@@ -97,10 +97,17 @@ export function sheet({ title, body, done = 'Fertig', onDone, cancel = true, cla
   });
 }
 
-export async function promptText(title, value = '', placeholder = '') {
+// suggestions: tappable chips under the field that fill it in
+export async function promptText(title, value = '', placeholder = '', suggestions = []) {
   const input = h('input', { class: 'field', value, placeholder });
   setTimeout(() => input.select());
-  const v = await sheet({ title, body: input, onDone: () => input.value.trim() || false });
+  const sugg = suggestions.filter(s => s !== value);
+  const body = sugg.length ? h('div', { class: 'form' }, input,
+    h('div', { class: 'suggest-label' }, 'Vorschläge'),
+    h('div', { class: 'suggest-chips' }, sugg.map(s => h('button', {
+      class: 'suggest-chip', onclick: () => { input.value = s; input.focus(); input.select(); },
+    }, s)))) : input;
+  const v = await sheet({ title, body, onDone: () => input.value.trim() || false });
   return v || null;
 }
 

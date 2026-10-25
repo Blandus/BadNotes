@@ -144,11 +144,12 @@ function drawText(ctx, t) {
 }
 
 // ---------- Pages ----------
-export async function renderPage(ctx, page, scale, hideId) {
+// ox/oy shift the output (in canvas pixels) so a cut-out of the page can be rendered.
+export async function renderPage(ctx, page, scale, hideId, ox = 0, oy = 0) {
   const srcs = [page.bg, ...page.elements.filter(e => e.type === 'image').map(e => e.src)].filter(Boolean);
   const imgs = new Map(await Promise.all(srcs.map(async s => [s, await loadImage(s)])));
   const h = pageH(page);
-  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
   ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
   ctx.fillStyle = paperColor(page); ctx.fillRect(0, 0, PAGE_W, h);
   if (page.bg && imgs.get(page.bg)) ctx.drawImage(imgs.get(page.bg), 0, 0, PAGE_W, h);

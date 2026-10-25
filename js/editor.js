@@ -4,10 +4,13 @@ import { store, settings, saveSettings, bus, PAGE_W, newPage, TEMPLATES } from '
 import { renderPage, renderThumb, pageH, drawStroke } from './render.js';
 import { menu, popover, sheet, toast, segmented, closePopover, promptText, toggle } from './ui.js';
 import { exportPdf, exportPng, loadImageFile } from './pdf.js';
+import { suggestNames } from './suggest.js';
 import { renderLibrary, templatePicker, openSettings } from './library.js';
 import { clearSelection, renderSelection, finishText, selectIds, hasSelection, deleteSelection } from './tools.js';
 
-const MAX_CANVAS_PX = 16e6; // iPad Safari's per-canvas limit (16.7 MP); few pages are kept rendered
+// Page canvases only need to look fine while scrolling; the detail layer provides sharpness.
+// Keeping them smaller saves iPad memory and makes each re-render faster.
+const MAX_CANVAS_PX = 6e6;
 
 // ---------- Tool configuration (per device) ----------
 const DEFAULT_TOOLS = {
@@ -179,7 +182,11 @@ export async function redo() { await finishText(); const op = hist().redo.pop();
 const observer = new IntersectionObserver(entries => {
   for (const e of entries) {
     if (e.isIntersecting) { visible.add(e.target); renderEl(e.target); }
-    else { visible.delete(e.target); e.target._canvas.width = 0; e.target._canvas.height = 0; }
+    else {
+      visible.delete(e.target);
+      e.target._canvas.width = 0; e.target._canvas.height = 0;
+      e.target._detail.hidden = true; e.target._detail.width = 0;
+    }
   }
 }, { root: sc, rootMargin: '300px 0px' });
 
@@ -198,6 +205,38 @@ export async function renderEl(el) {
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'copy';
   ctx.drawImage(off, 0, 0);
   ctx.globalCompositeOperation = 'source-over';
+  await renderDetail(el);
+}
+
+// ---------- Sharp detail layer ----------
+// The page canvas above has a capped resolution (memory), so it gets soft when zoomed in.
+// On top of it, each visible page gets a "detail" canvas covering only its on-screen part,
+// rendered at exact device resolution — sharp at any zoom, like Goodnotes. While scrolling or
+// zooming the detail is hidden (the page canvas shows) and redrawn once movement stops.
+const hideIdFor = page => ed.editing?.page === page ? ed.editing.id : null;
+async function renderDetail(el) {
+  const det = el._detail;
+  if (!det || !visible.has(el)) return;
+  const token = el._detailToken = (el._detailToken || 0) + 1;
+  const r = el.getBoundingClientRect(), s = sc.getBoundingClientRect();
+  const x0 = Math.max(r.left, s.left), y0 = Math.max(r.top, s.top), x1 = Math.min(r.right, s.right), y1 = Math.min(r.bottom, s.bottom);
+  if (x1 <= x0 || y1 <= y0 || !r.width) { det.hidden = true; return; }
+  const dpr = window.devicePixelRatio || 1, k = r.width / PAGE_W * dpr;
+  const off = document.createElement('canvas');
+  off.width = Math.round((x1 - x0) * dpr); off.height = Math.round((y1 - y0) * dpr);
+  await renderPage(off.getContext('2d'), el._page, k, hideIdFor(el._page), -(x0 - r.left) * dpr, -(y0 - r.top) * dpr);
+  if (token !== el._detailToken) return; // superseded, or scrolled/zoomed meanwhile
+  det.width = off.width; det.height = off.height;
+  det.getContext('2d').drawImage(off, 0, 0);
+  Object.assign(det.style, { left: x0 - r.left + 'px', top: y0 - r.top + 'px', width: x1 - x0 + 'px', height: y1 - y0 + 'px' });
+  det.hidden = false;
+}
+let detailT;
+function hideDetails() {
+  // Bumping the token also discards any detail render still in flight.
+  ed.pageEls.forEach(el => { if (el._detail) { el._detail.hidden = true; el._detailToken = (el._detailToken || 0) + 1; } });
+  clearTimeout(detailT);
+  detailT = setTimeout(() => visible.forEach(renderDetail), 140);
 }
 export const elForPage = page => ed.pageEls.find(el => el._page === page);
 export function refreshPage(page) {
@@ -225,6 +264,7 @@ export function setZoom(z, cx, cy) {
   sc.scrollLeft = ox * k - (cx - r.left);
   sc.scrollTop = oy * k - (cy - r.top);
   updateZoomLabel();
+  hideDetails();
   clearTimeout(zoomT); zoomT = setTimeout(() => { rerenderVisible(); renderSelection(); }, 200);
   repositionText();
 }
@@ -234,10 +274,10 @@ export function buildPages() {
   applyZoom();
   ed.pageEls = ed.doc.pages.map(page => {
     const el = h('div', { class: 'page', style: { aspectRatio: `${PAGE_W} / ${pageH(page)}` } });
-    const c = h('canvas');
-    el.append(c);
+    const c = h('canvas'), det = h('canvas', { class: 'page-detail', hidden: true });
+    el.append(c, det);
     if (page.bookmark) el.append(h('div', { class: 'page-bm' }, icon('bookmarkFill', 20)));
-    el._page = page; el._canvas = c;
+    el._page = page; el._canvas = c; el._detail = det;
     observer.observe(el);
     return el;
   });
@@ -271,7 +311,7 @@ function updateCurrent() {
   updateBookmarkBtn();
   $('#pageInd').textContent = `${ed.cur + 1} von ${ed.doc.pages.length}`;
 }
-sc.addEventListener('scroll', () => { updateCurrent(); repositionText(); });
+sc.addEventListener('scroll', () => { updateCurrent(); repositionText(); hideDetails(); });
 
 let resizeT;
 window.addEventListener('resize', () => {
@@ -492,7 +532,7 @@ function buildToolbar() {
 }
 
 async function renameDoc() {
-  const name = await promptText('Umbenennen', ed.doc.name);
+  const name = await promptText('Umbenennen', ed.doc.name, '', suggestNames(ed.doc));
   if (!name) return;
   ed.doc.name = name; changed(); renderTabs();
 }

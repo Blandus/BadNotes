@@ -71,5 +71,5 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   if (settings.activeTab && ed.tabs.includes(settings.activeTab)) openDoc(settings.activeTab);
   else renderLibrary();
   offerClipboardImport();
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
 })();

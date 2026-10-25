@@ -1,10 +1,11 @@
-import { $, h, fmtDate, pickFile, onContext } from './util.js';
+import { $, h, fmtDate, pickFile } from './util.js';
 import { icon } from './icons.js';
-import { store, settings, saveSettings, bus, newNotebook, newFolder, cloneNotebook, newPage, COVERS, TEMPLATES, TEMPLATE_SECTIONS, PAPERS, FORMATS, PAGE_W } from './store.js';
+import { store, settings, saveSettings, bus, newNotebook, newFolder, cloneNotebook, newPage, COVERS, TEMPLATES, TEMPLATE_SECTIONS, PAPERS, FORMATS, PAGE_W, APP_VERSION } from './store.js';
 import { renderCover, renderThumb } from './render.js';
 import { menu, sheet, promptText, confirmBox, toast, segmented, toggle } from './ui.js';
 import { pdfToPages, loadImageFile, exportPdf } from './pdf.js';
 import { openDoc } from './editor.js';
+import { suggestNames } from './suggest.js';
 import { sync } from './sync.js';
 
 const SECTIONS = {
@@ -31,7 +32,7 @@ function folderPath(id) {
   return out;
 }
 const descendants = id => live().filter(r => r.parent === id).flatMap(r => [r, ...(r.kind === 'folder' ? descendants(r.id) : [])]);
-const containsText = (r, q) => r.kind === 'notebook' && r.pages.some(p => p.elements.some(e => e.type === 'text' && e.text.toLowerCase().includes(q)));
+const containsText = (r, q) => r.kind === 'notebook' && r.pages.some(p => (p.pdfText || '').toLowerCase().includes(q) || p.elements.some(e => e.type === 'text' && e.text.toLowerCase().includes(q)));
 
 function items() {
   const all = live();
@@ -76,6 +77,7 @@ function renderSidebar() {
   const folders = live().filter(r => r.kind === 'folder' && !r.trashed && !r.parent).sort((a, b) => a.name.localeCompare(b.name, 'de'));
   const item = (key, s) => h('button', {
     class: 'sb-item' + (lib.section === key && !lib.folder && !lib.query ? ' active' : ''),
+    'data-drop': key === 'docs' ? '' : null, // dropping on "Dokumente" moves to the top level
     onclick: () => go(key),
   }, icon(s.icon, 24), h('span', {}, s.label));
   sb.replaceChildren(
@@ -84,6 +86,7 @@ function renderSidebar() {
       item('docs', SECTIONS.docs),
       ...folders.map(f => h('button', {
         class: 'sb-item sub' + (lib.folder && folderPath(lib.folder)[0]?.id === f.id ? ' active' : ''),
+        'data-drop': f.id,
         onclick: () => go('docs', f.id),
       }, icon('folder', 20), h('span', {}, f.name))),
       item('favorites', SECTIONS.favorites),
@@ -157,7 +160,7 @@ function renderHeader() {
   head.replaceChildren(top,
     h('div', { class: 'lib-titlebar' },
       h('div', { class: 'lib-title' },
-        path.length && !lib.query ? h('button', { class: 'backbtn', title: 'Zurück', onclick: () => go('docs', path[path.length - 2]?.id || null) }, icon('chevronLeft', 26)) : null,
+        path.length && !lib.query ? h('button', { class: 'backbtn', title: 'Zurück', 'data-drop': path[path.length - 2]?.id || '', onclick: () => go('docs', path[path.length - 2]?.id || null) }, icon('chevronLeft', 26)) : null,
         h('h1', { id: 'libTitle' }, title)),
       h('div', { class: 'lib-actions' }, ...right.flat())));
 }
@@ -210,7 +213,8 @@ function tile(r) {
       r.favorite ? h('span', { class: 'fav-badge' }, icon('starFill', 14)) : null),
     h('div', { class: 'tile-title' }, h('span', { title: r.name }, r.name), lib.selecting ? null : chev),
     h('div', { class: 'tile-sub' }, sub(r)));
-  onContext(t, (x, y) => itemMenu(r, { x, y }));
+  if (r.kind === 'folder' && !r.trashed) t.dataset.drop = r.id;
+  dragToFolder(t, r);
   return t;
 }
 
@@ -223,9 +227,102 @@ function row(r) {
         h('div', { class: 'row-sub' }, sub(r) + (r.kind === 'notebook' ? ` · ${r.pages.length} ${r.pages.length === 1 ? 'Seite' : 'Seiten'}` : ''))),
       lib.selecting ? h('span', { class: 'checkmark' }, lib.selected.has(r.id) ? icon('check', 16) : '') : null),
     lib.selecting ? null : h('button', { class: 'chev', title: 'Optionen', onclick: e => itemMenu(r, e.currentTarget) }, icon('chevronDown', 16)));
-  onContext(el, (x, y) => itemMenu(r, { x, y }));
+  if (r.kind === 'folder' && !r.trashed) el.dataset.drop = r.id;
+  dragToFolder(el, r);
   return el;
 }
+
+// ---------- Drag into folders ----------
+// Touch/pen: press ~0.45 s, then drag; releasing over a folder moves the item there.
+// Releasing without dragging opens the item menu (the previous long-press behaviour).
+// Mouse: drag right away; right-click opens the menu.
+const LIFT_MS = 450;
+function dragToFolder(el, r) {
+  el.addEventListener('contextmenu', e => { e.preventDefault(); if (!drag) itemMenu(r, { x: e.clientX, y: e.clientY }); });
+  if (r.trashed) return;
+  el.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || drag || e.target.closest('.chev')) return;
+    const st = { el, r, id: e.pointerId, x: e.clientX, y: e.clientY, mouse: e.pointerType === 'mouse', lifted: false };
+    pending = st;
+    if (!st.mouse) st.timer = setTimeout(() => lift(st, st.x, st.y), LIFT_MS);
+  });
+}
+
+let pending = null, drag = null, swallowClick = false;
+function lift(st, x, y) {
+  if (pending !== st) return;
+  pending = null;
+  st.lifted = true; drag = st;
+  navigator.vibrate?.(10);
+  // Drag everything selected if the pressed item is part of the selection.
+  st.ids = lib.selecting && lib.selected.has(st.r.id) ? [...lib.selected] : [st.r.id];
+  const art = st.el.querySelector('canvas, .folder-art');
+  const ghost = h('div', { class: 'drag-ghost' });
+  if (art?.tagName === 'CANVAS') { const c = h('canvas'); c.width = art.width; c.height = art.height; c.getContext('2d').drawImage(art, 0, 0); ghost.append(c); }
+  else if (art) ghost.append(art.cloneNode(true));
+  ghost.append(h('span', {}, st.ids.length > 1 ? `${st.ids.length} Objekte` : st.r.name));
+  document.body.append(ghost);
+  st.ghost = ghost;
+  st.el.classList.add('drag-source');
+  moveGhost(x, y);
+}
+function moveGhost(x, y) {
+  drag.ghost.style.transform = `translate(${x}px, ${y}px)`;
+  const target = document.elementFromPoint(x, y)?.closest('[data-drop]');
+  const valid = target && canDrop(target.dataset.drop || null);
+  document.querySelectorAll('.drop-target').forEach(n => n !== target && n.classList.remove('drop-target'));
+  if (valid) target.classList.add('drop-target');
+  drag.target = valid ? target : null;
+}
+// No dropping into itself, into one of its own subfolders, or where it already is.
+function canDrop(folderId) {
+  return drag.ids.every(id => {
+    if (id === folderId) return false;
+    if (folderId && folderPath(folderId).some(f => f.id === id)) return false;
+    return (byId(id).parent || null) !== folderId;
+  });
+}
+async function endDrag(cancelled) {
+  const st = drag; drag = null;
+  st.ghost.remove();
+  st.el.classList.remove('drag-source');
+  document.querySelectorAll('.drop-target').forEach(n => n.classList.remove('drop-target'));
+  swallowClick = true; setTimeout(() => { swallowClick = false; }, 50);
+  if (cancelled) return;
+  if (!st.target) {
+    if (!st.moved && !st.mouse) itemMenu(st.r, { x: st.x, y: st.y }); // plain long press → menu
+    return;
+  }
+  const folderId = st.target.dataset.drop || null;
+  const now = Date.now();
+  await store.putMany(st.ids.map(byId).map(x => Object.assign(x, { parent: folderId, updated: now })));
+  lib.selecting = false; lib.selected.clear();
+  toast(`Verschoben nach „${folderId ? byId(folderId).name : 'Dokumente'}“`);
+}
+
+document.addEventListener('pointermove', e => {
+  if (pending && e.pointerId === pending.id) {
+    const d = Math.hypot(e.clientX - pending.x, e.clientY - pending.y);
+    if (pending.mouse && d > 6) lift(pending, e.clientX, e.clientY);
+    else if (!pending.mouse && d > 10) { clearTimeout(pending.timer); pending = null; } // it's a scroll
+  }
+  if (drag && e.pointerId === drag.id) {
+    if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 8) drag.moved = true;
+    moveGhost(e.clientX, e.clientY);
+  }
+});
+document.addEventListener('pointerup', e => {
+  if (pending && e.pointerId === pending.id) { clearTimeout(pending.timer); pending = null; }
+  if (drag && e.pointerId === drag.id) endDrag(false);
+});
+document.addEventListener('pointercancel', e => {
+  if (pending && e.pointerId === pending.id) { clearTimeout(pending.timer); pending = null; }
+  if (drag && e.pointerId === drag.id) endDrag(true);
+});
+// While dragging, stop the page from scrolling under the finger.
+document.addEventListener('touchmove', e => { if (drag) e.preventDefault(); }, { passive: false });
+// The click that ends a drag must not open the item.
+document.addEventListener('click', e => { if (swallowClick) { e.stopPropagation(); e.preventDefault(); } }, true);
 
 // ---------- Menus ----------
 function newMenu(anchor) {
@@ -266,7 +363,7 @@ function itemMenu(r, anchor) {
 async function update(r, patch) { Object.assign(r, patch, { updated: Date.now() }); await store.put(r); }
 
 async function rename(r) {
-  const name = await promptText('Umbenennen', r.name);
+  const name = await promptText('Umbenennen', r.name, '', r.kind === 'notebook' ? suggestNames(r) : []);
   if (name) update(r, { name });
 }
 
@@ -515,19 +612,74 @@ export async function importPdfFile(file, name = file.name) {
   } catch (err) { toast('Import fehlgeschlagen: ' + err.message, 5000); }
 }
 
-// Clipboard import, used with the iOS shortcut "In Notizen öffnen" (see README):
-// the shortcut copies "NOTIZEN-PDF|<file name>|<base64>" — plain base64 of a PDF works too.
-export async function importFromClipboard() {
-  let text;
-  try { text = (await navigator.clipboard.readText()).trim(); } catch { return toast('Kein Zugriff auf die Zwischenablage', 3000); }
-  let name = 'Importiertes PDF', b64 = text;
-  const m = text.match(/^NOTIZEN-PDF\|([^|]*)\|([\s\S]+)$/);
+// Clipboard import. Two kinds of content are understood:
+// - a copied PDF *file* (e.g. Goodnotes "Exportieren → Kopieren", Files "Kopieren")
+// - text from the iOS shortcut "In Notizen öffnen": "NOTIZEN-PDF|<file name>|<base64>" (or plain base64)
+// Safari's clipboard API only hands out text and images, so for files we fall back to a paste
+// field: the system "Einfügen" (long press / Cmd+V) does deliver copied files to the page.
+const looksLikePdf = f => f && (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || ''));
+
+async function pdfFromText(text) {
+  let name = 'Importiertes PDF', b64 = (text || '').trim();
+  const m = b64.match(/^NOTIZEN-PDF\|([^|]*)\|([\s\S]+)$/);
   if (m) { name = m[1] || name; b64 = m[2]; }
   b64 = b64.replace(/\s+/g, '');
-  if (!b64.startsWith('JVBER')) return toast('Keine PDF in der Zwischenablage', 3000); // "%PDF" in base64
-  const blob = await (await fetch('data:application/pdf;base64,' + b64)).blob();
+  if (!b64.startsWith('JVBER')) return null; // "%PDF" in base64
+  return { blob: await (await fetch('data:application/pdf;base64,' + b64)).blob(), name };
+}
+
+async function pdfFromClipboardAPI() {
+  try {
+    for (const item of await navigator.clipboard.read()) {
+      if (item.types.includes('application/pdf')) return { blob: await item.getType('application/pdf'), name: 'Eingefügtes PDF' };
+      if (item.types.includes('text/plain')) {
+        const r = await pdfFromText(await (await item.getType('text/plain')).text());
+        if (r) return r;
+      }
+    }
+  } catch {}
+  try { return await pdfFromText(await navigator.clipboard.readText()); } catch { return null; }
+}
+
+function gotPdf({ blob, name }) {
   if (!settings.clipImport) { settings.clipImport = true; saveSettings(); } // from now on offer it when the app is opened
   importPdfFile(blob, name);
+}
+
+export async function importFromClipboard() {
+  const direct = await pdfFromClipboardAPI();
+  if (direct) return gotPdf(direct);
+  pasteSheet();
+}
+
+// Paste field: tap it, then "Einfügen" from the iOS menu (or Cmd/Ctrl+V).
+function pasteSheet() {
+  const zone = h('div', {
+    class: 'paste-zone', contenteditable: 'true', role: 'textbox', 'aria-label': 'Hier einfügen',
+    'data-placeholder': 'Hier tippen und „Einfügen“ wählen',
+  });
+  let close;
+  zone.addEventListener('paste', async e => {
+    e.preventDefault();
+    const files = [...(e.clipboardData?.files || [])];
+    const items = [...(e.clipboardData?.items || [])].filter(i => i.kind === 'file').map(i => i.getAsFile());
+    const pdf = [...files, ...items].find(looksLikePdf);
+    if (pdf) { close(); return gotPdf({ blob: pdf, name: pdf.name || 'Eingefügtes PDF' }); }
+    const fromText = await pdfFromText(e.clipboardData?.getData('text/plain'));
+    if (fromText) { close(); return gotPdf(fromText); }
+    const kinds = [...(e.clipboardData?.types || [])].join(', ') || 'nichts';
+    zone.textContent = '';
+    toast(`Keine PDF gefunden (Zwischenablage enthält: ${kinds})`, 5000);
+  });
+  zone.addEventListener('input', () => { zone.textContent = ''; });
+  const body = h('div', { class: 'form' },
+    zone,
+    h('div', { class: 'hint' }, 'Kopiere vorher die PDF, z. B. in Goodnotes über Exportieren → PDF → Kopieren oder in der Dateien-App über Kopieren.'));
+  const p = sheet({ title: 'PDF einfügen', body, done: null });
+  // Close through the sheet's own cancel button so its listeners are cleaned up.
+  close = () => zone.closest('.sheet')?.querySelector('.sheet-head .textbtn')?.click();
+  setTimeout(() => zone.focus(), 300);
+  return p;
 }
 
 async function importImage() {
@@ -559,7 +711,8 @@ export async function openSettings() {
       h('div', { class: 'hint' }, 'An: Finger scrollen und zoomen, nur der Apple Pencil zeichnet.')),
     h('div', { class: 'form-label' }, 'Google-Drive-Synchronisation'),
     clientId,
-    h('div', { class: 'hint' }, 'OAuth-Client-ID aus der Google Cloud Console (siehe README).'));
+    h('div', { class: 'hint' }, 'OAuth-Client-ID aus der Google Cloud Console (siehe README).'),
+    h('div', { class: 'hint', style: { marginTop: '14px', textAlign: 'center' } }, `Notizen · Version ${APP_VERSION}`));
   const ok = await sheet({ title: 'Einstellungen', body });
   if (ok) { settings.clientId = clientId.value.trim(); saveSettings(); renderSidebar(); }
 }

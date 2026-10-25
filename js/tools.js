@@ -38,7 +38,17 @@ export function initTools() {
   }, { passive: false });
   document.addEventListener('keydown', onKey);
   document.addEventListener('gesturestart', e => e.preventDefault());
+  // Stop iOS from running its own touch gestures (scroll, selection, palm handling) on the
+  // canvas area: those make Safari cancel the pencil's pointer mid-stroke. Scrolling and
+  // zooming are done by our own pointer handling. Buttons inside pages keep working.
+  const blockNative = e => { if (!e.target.closest('button, textarea, input, .sel-menu, .lasso-hint, .shape-handle')) e.preventDefault(); };
+  sc.addEventListener('touchstart', blockNative, { passive: false });
+  sc.addEventListener('touchmove', blockNative, { passive: false });
 }
+
+// Time of the last pen activity: touches shortly after it are the writing hand, not gestures.
+let lastPen = 0;
+const palmLikely = () => (drawing && !drawing.touch) || performance.now() - lastPen < 600;
 
 function sizeOverlay() {
   const r = overlay.parentElement.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
@@ -187,12 +197,16 @@ function onDown(e) {
   hideShapeHandles();
   if (e.pointerType === 'touch') {
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    tap = touches.size === 1 ? { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() } : null;
+    // A hand resting while (or right after) writing must not tap, scroll or zoom.
+    tap = touches.size === 1 && !palmLikely() ? { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() } : null;
     if (settings.fingerDraw && touches.size === 1 && !drawing) return start(e);
     if (drawing?.touch) cancelDrawing();
     startGesture();
     return;
   }
+  if (e.pointerType === 'pen') lastPen = performance.now();
+  // A new pencil contact while the previous stroke never got its "up": keep that stroke.
+  if (drawing && !drawing.touch && e.pointerType === 'pen' && drawing.id !== e.pointerId) finish(true);
   if (e.button !== 0 || drawing) return;
   start(e);
 }
@@ -225,6 +239,7 @@ function start(e) {
 function onMove(e) {
   if (drawing && e.pointerId === drawing.id) {
     e.preventDefault();
+    if (e.pointerType === 'pen') lastPen = performance.now();
     let evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
     if (!evs.length) evs = [e];
     const d = drawing;
@@ -258,6 +273,7 @@ function onMove(e) {
   }
   if (e.pointerType === 'touch' && touches.has(e.pointerId) && gesture) {
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (palmLikely()) { startGesture(); return; } // resting hand: don't move the page under the pen
     const g = gestureState();
     sc.scrollLeft -= g.cx - gesture.cx;
     sc.scrollTop -= g.cy - gesture.cy;
@@ -270,7 +286,10 @@ function onMove(e) {
 let hoverCursor = null;
 
 function onUp(e, ok) {
-  if (drawing && e.pointerId === drawing.id) finish(ok);
+  if (e.pointerType === 'pen') lastPen = performance.now();
+  // Safari cancels the pencil's pointer when it thinks the palm started a gesture; the ink
+  // drawn up to that point is real, so a cancelled pen stroke is kept, not thrown away.
+  if (drawing && e.pointerId === drawing.id) finish(ok || (drawing.kind === 'stroke' && !drawing.touch));
   if (touches.delete(e.pointerId)) startGesture();
   if (ok && e.pointerType === 'touch') detectDoubleTap(e);
 }

@@ -23,10 +23,39 @@ export async function pdfToPages(file) {
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
     // 'print' intent renders without requestAnimationFrame (works in background tabs too)
     await p.render({ canvasContext: ctx, viewport: vp, intent: 'print' }).promise;
-    pages.push({ id: uid(), template: 'blank', bg: c.toDataURL('image/jpeg', 0.85), h: Math.round(PAGE_W * vp1.height / vp1.width), elements: [] });
+    const page = { id: uid(), template: 'blank', bg: c.toDataURL('image/jpeg', 0.85), h: Math.round(PAGE_W * vp1.height / vp1.width), elements: [] };
+    // Keep the PDF's text (for search and name suggestions); the page itself is only an image.
+    try {
+      const { text, title } = await pageText(p);
+      if (text) page.pdfText = text;
+      if (i === 1 && title) page.pdfTitle = title;
+    } catch {}
+    pages.push(page);
   }
+  try {
+    const meta = (await doc.getMetadata())?.info?.Title?.trim();
+    if (meta && pages[0]) pages[0].pdfMetaTitle = meta;
+  } catch {}
   toast(`${pages.length} ${pages.length === 1 ? 'Seite' : 'Seiten'} importiert`);
   return pages;
+}
+
+// Text of one PDF page (max. 4000 chars) and its "title": the line in the largest font
+// within the upper half of the page.
+async function pageText(p) {
+  const tc = await p.getTextContent();
+  const vh = p.getViewport({ scale: 1 }).height;
+  const items = tc.items.filter(it => it.str?.trim()).map(it => ({
+    str: it.str, size: Math.hypot(it.transform[2], it.transform[3]), y: it.transform[5],
+  }));
+  const text = items.map(it => it.str).join(' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
+  const top = items.filter(it => it.y > vh * 0.5);
+  if (!top.length) return { text };
+  const max = Math.max(...top.map(it => it.size));
+  // all pieces of that size, top to bottom (PDF y grows upwards)
+  const title = top.filter(it => it.size > max * 0.92).sort((a, b) => b.y - a.y)
+    .map(it => it.str).join(' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+  return { text, title };
 }
 
 // Downscales an image file and returns {src, w, h} in pixels.
