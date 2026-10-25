@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Notizen">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#F2F2F7">
+<title>Notizen</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<section id="library" class="view">
+  <aside id="sidebar" class="sidebar"></aside>
+  <main class="lib-main">
+    <header id="libHead" class="lib-head"></header>
+    <div id="libContent" class="lib-content"></div>
+  </main>
+</section>
+
+<section id="editor" class="view" hidden>
+  <div class="tabbar" id="tabbar" hidden><div id="tabs" class="tabs"></div></div>
+  <div class="toolbar">
+    <div class="tb-group" id="tbLeft"></div>
+    <div class="tb-tools" id="tbTools"></div>
+    <div class="tb-group right" id="tbRight"></div>
+  </div>
+  <div class="ed-body">
+    <aside id="thumbs" class="thumbs" hidden></aside>
+    <div class="stage">
+      <div id="scroller"><div id="pages"></div></div>
+      <canvas id="overlay"></canvas>
+      <div id="undoPill" class="float-pill undo-pill"></div>
+      <div id="optbar" class="opt-pill"></div>
+      <div id="pageInd" class="float-pill page-pill"></div>
+      <div id="zoomPill" class="float-pill zoom-pill"></div>
+    </div>
+    <aside id="searchPanel" class="side-panel" hidden></aside>
+  </div>
+</section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async></script>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

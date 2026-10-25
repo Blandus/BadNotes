@@ -1,0 +1,87 @@
+import { uid } from './util.js';
+
+export const PAGE_W = 1000;
+export const FORMATS = { a4: { label: 'A4 Hoch', h: 1414 }, a4l: { label: 'A4 Quer', h: 707 }, letter: { label: 'Letter', h: 1294 } };
+export const TEMPLATES = {
+  blank: 'Leer', dots: 'Gepunktet', narrow: 'Liniert schmal', lined: 'Liniert breit', grid: 'Kariert',
+  cornell: 'Cornell', notepad: 'Notizblock', twocol: 'Zwei Spalten', threecol: 'Drei Spalten',
+};
+export const TEMPLATE_SECTIONS = [
+  ['Herkömmlich', ['blank', 'dots', 'narrow', 'lined', 'grid']],
+  ['Schreibpapier', ['cornell', 'notepad', 'twocol', 'threecol']],
+];
+export const PAPERS = { white: { label: 'Weißes Papier', color: '#FFFFFF' }, yellow: { label: 'Gelbes Papier', color: '#FBF8EC' }, dark: { label: 'Dunkles Papier', color: '#2B2A2A' } };
+export const COVERS = ['#2E4A6B', '#3D7EB8', '#3F8F84', '#5B8C3E', '#D2A33A', '#D9792E', '#C2483F', '#A04A84', '#5D4C8E', '#3A3A3C', '#9A9AA0', '#E5D8C3'];
+
+// ---------- Settings (per device) ----------
+export let settings = {};
+try { settings = JSON.parse(localStorage.getItem('settings') || '{}'); } catch {}
+export function saveSettings() { try { localStorage.setItem('settings', JSON.stringify(settings)); } catch {} }
+
+// ---------- Change notifications ----------
+export const bus = new EventTarget();
+export const emit = (type, detail) => bus.dispatchEvent(new CustomEvent(type, { detail }));
+
+// Upgrades records written by older versions of the app.
+function migrate(r) {
+  if (!r.kind) r.kind = 'notebook';
+  if (r.kind === 'notebook') {
+    r.pages ||= [];
+    for (const p of r.pages) {
+      if (p.strokes) { p.elements = p.strokes.map(s => ({ type: 'stroke', pen: 'fountain', ...s })); delete p.strokes; }
+      p.elements ||= [];
+      for (const e of p.elements) e.id ||= uid();
+    }
+  }
+  return r;
+}
+
+// ---------- IndexedDB ----------
+let db;
+function tx(mode, fn) {
+  return new Promise((res, rej) => {
+    const t = db.transaction('notebooks', mode);
+    const req = fn(t.objectStore('notebooks'));
+    t.oncomplete = () => res(req.result);
+    t.onerror = () => rej(t.error);
+  });
+}
+export const store = {
+  open() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('notizen', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('notebooks', { keyPath: 'id' });
+      r.onsuccess = () => { db = r.result; res(); };
+      r.onerror = () => rej(r.error);
+    });
+  },
+  async all() { return (await tx('readonly', s => s.getAll())).map(migrate); },
+  async get(id) { const r = await tx('readonly', s => s.get(id)); return r && migrate(r); },
+  async put(r) { await tx('readwrite', s => s.put(r)); emit('change', r.id); },
+  async putMany(rs) { await tx('readwrite', s => { let q; for (const r of rs) q = s.put(r); return q || { result: null }; }); emit('change', null); },
+};
+
+export const newPage = (template = 'lined', h = 1414, paper) => ({ id: uid(), template, h, elements: [], ...(paper && paper !== 'white' ? { paper } : {}) });
+
+export function newNotebook({ name, cover = null, template = 'lined', format = 'a4', paper, parent = null, pages } = {}) {
+  const now = Date.now();
+  return {
+    kind: 'notebook', id: uid(), name: name || 'Unbenannt', parent, cover,
+    created: now, updated: now, opened: now,
+    pages: pages || [newPage(template, FORMATS[format].h, paper)],
+  };
+}
+
+export function newFolder(name, parent = null) {
+  const now = Date.now();
+  return { kind: 'folder', id: uid(), name, parent, created: now, updated: now };
+}
+
+// Deep copy with fresh ids (pages and elements too).
+export function cloneNotebook(r, name) {
+  const c = structuredClone(r);
+  c.id = uid(); c.name = name; c.created = c.updated = c.opened = Date.now();
+  c.favorite = false;
+  for (const p of c.pages) { p.id = uid(); for (const e of p.elements) e.id = uid(); }
+  return c;
+}
