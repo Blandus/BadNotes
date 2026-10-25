@@ -1,13 +1,13 @@
 // Export to the Goodnotes document format (.goodnotes) — EXPERIMENTAL.
 // Mirrors the structure read in goodnotes.js (see there for the format description):
 // - one PDF attachment holding every page's background (paper, template, imported PDF/image
-//   background and text boxes, flattened), referenced by one page-background record per page
-// - one sheet per page with a sort key, and a notes file per sheet with the ink:
-//   header + element record per stroke (Apple-LZ4-wrapped "tpl" geometry) and per image
-// Search/handwriting-recognition indexes (record types 102–106) are left out; Goodnotes
-// builds those itself.
+//   background, flattened), referenced by one page-background record per page
+// - one sheet per page with a sort key, and a notes file per sheet with its elements:
+//   header + element record per stroke (Apple-LZ4-wrapped "tpl" geometry), image and text box
+// Records 103, 105 (attachment search entries) and 106 (element list per sheet, for images)
+// follow Goodnotes' own files.
 import { PAGE_W } from './store.js';
-import { pageH, pieceWidth, renderPage } from './render.js';
+import { pageH, renderPage, toRadius, textHeight } from './render.js';
 import { toast, sheet } from './ui.js';
 import { h } from './util.js';
 
@@ -110,35 +110,63 @@ function rgba(hex, a = 1) {
 }
 
 // ---------- strokes → Goodnotes geometry ----------
-// Each segment between two points becomes a straight quadratic segment (control = midpoint) and
-// a piece of outline along both edges at the local width (move, line, line, line → closed band).
-// Joints and ends are covered by the neighbouring pieces; no outline point lies inside the stroke.
+// The centre line is written exactly as Folio draws it: quadratic pieces from midpoint to
+// midpoint with the points as controls (shapes and highlighters: straight pieces between
+// their points). Every point carries its half width in points as third value — Goodnotes
+// draws the line from it. Each piece also gets its outline: both edges as curves, offset by
+// the radius, joined by straight lines.
 function strokeTpl(s) {
-  let pts = s.points.map(p => [p[0] * PT, p[1] * PT, p[2] ?? 0.5]);
+  const fixed = s.tool === 'highlighter' || s.shape;
+  const rs = fixed ? null : toRadius(s).points; // half widths (no-op for radius strokes)
+  let pts = s.points.map((p, i) => [p[0] * PT, p[1] * PT, (fixed ? s.width / 2 : rs[i][2]) * PT]);
   if (s.closed && pts.length > 2) pts = [...pts, pts[0]];
   // Zero-length segments make direction/tangent 0/0 → Goodnotes draws spikes. Drop near-duplicates.
   pts = pts.filter((p, i) => i === 0 || Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) > 0.05);
   if (pts.length === 1) pts = [pts[0], [pts[0][0] + 0.1, pts[0][1], pts[0][2]]];
-  const hl = s.tool === 'highlighter' || s.shape;
-  const widthAt = (p, dx, dy) => (hl ? s.width : pieceWidth(s, p, dx, dy)) * PT;
-  const segs = [], ctrl = [], tangents = [], outline = [], cmds = [], counts = [];
-  for (let i = 1; i < pts.length; i++) {
-    const a = pts[i - 1], b = pts[i];
-    const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1;
-    const ux = dx / len, uy = dy / len, nx = -uy, ny = ux;
-    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, mp = (a[2] + b[2]) / 2;
-    segs.push(mx, my, mp, b[0], b[1], b[2]);
-    ctrl.push(mx, my);
-    tangents.push(a[0], a[1], a[2], ux, uy, b[0], b[1], b[2], ux, uy);
-    const ra = widthAt(a[2], dx, dy) / 2, rb = widthAt(b[2], dx, dy) / 2;
-    outline.push(
-      a[0] + nx * ra, a[1] + ny * ra,   // move: start, left edge
-      b[0] + nx * rb, b[1] + ny * rb,   // line: end, left edge
-      b[0] - nx * rb, b[1] - ny * rb,   // line: end, right edge
-      a[0] - nx * ra, a[1] - ny * ra);  // line: start, right edge
-    cmds.push(0, 2, 2, 2); counts.push(4);
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+
+  // pieces [start, control, end]
+  const pieces = [];
+  if (fixed || pts.length === 2) {
+    for (let i = 1; i < pts.length; i++) pieces.push([pts[i - 1], mid(pts[i - 1], pts[i]), pts[i]]);
+  } else {
+    let prev = pts[0];
+    for (let i = 1; i < pts.length - 1; i++) { const m = mid(pts[i], pts[i + 1]); pieces.push([prev, pts[i], m]); prev = m; }
+    const last = pts[pts.length - 1];
+    pieces.push([prev, mid(prev, last), last]);
   }
-  const n = pts.length - 1;
+
+  const unit = (x, y) => { const l = Math.hypot(x, y); return l > 1e-6 ? [x / l, y / l] : null; };
+  const segs = [], ctrl = [], tangents = [], outline = [], cmds = [], counts = [];
+  for (const [a, c, b] of pieces) {
+    const chord = unit(b[0] - a[0], b[1] - a[1]) || [1, 0];
+    const ta = unit(c[0] - a[0], c[1] - a[1]) || chord, tb = unit(b[0] - c[0], b[1] - c[1]) || chord;
+    segs.push(...c, ...b);
+    ctrl.push(c[0], c[1]);
+    tangents.push(...a, ...ta, ...b, ...tb);
+    // Edge of the piece at distance r on one side (side = 1 left, -1 right): ends offset along
+    // their normals; the control is where the two offset tangents meet (fallback: offset control).
+    const edge = side => {
+      const na = [-ta[1] * side, ta[0] * side], nb = [-tb[1] * side, tb[0] * side];
+      const A = [a[0] + na[0] * a[2], a[1] + na[1] * a[2]], B = [b[0] + nb[0] * b[2], b[1] + nb[1] * b[2]];
+      const det = ta[0] * tb[1] - ta[1] * tb[0];
+      let C;
+      if (Math.abs(det) > 1e-3) {
+        const t = ((B[0] - A[0]) * tb[1] - (B[1] - A[1]) * tb[0]) / det;
+        C = [A[0] + ta[0] * t, A[1] + ta[1] * t];
+        if (Math.hypot(C[0] - c[0], C[1] - c[1]) > 4 * Math.max(a[2], b[2], c[2]) + 1) C = null; // runaway
+      }
+      if (!C) { const n = unit(na[0] + nb[0], na[1] + nb[1]) || na; C = [c[0] + n[0] * c[2], c[1] + n[1] * c[2]]; }
+      return [A, C, B];
+    };
+    const [la, lc, lb] = edge(1), [ra, rc, rb] = edge(-1);
+    // Outline commands as in Goodnotes' own strokes: 0 = start a piece, 2 = curve stored as
+    // 3 points (start, control, end), 3 = straight line to the next curve's start / back to
+    // the piece's start. Each command 2 MUST have its 3 points; Goodnotes crashes otherwise.
+    outline.push(...la, ...lc, ...lb, ...rb, ...rc, ...ra);
+    cmds.push(0, 2, 3, 2, 3); counts.push(5);
+  }
+  const n = pieces.length;
   return tpl([
     ['v', 2],
     ['Av', [0, ...Array(n).fill(1)]],
@@ -154,11 +182,46 @@ function strokeTpl(s) {
   ]);
 }
 
+// ---------- text boxes ----------
+// Layout from a Goodnotes 6 file with text boxes (record schema 35): element field 21 with
+// 20 position (top-left of the box, points) + scale, 21 sizing (2 = fixed width {box width,
+// min height, max height}), 32 the text: 1 content (Apple-LZ4 protobuf: 1.1 text, 1.2 style
+// run: 3 colour, 40 size; -404 = "use default"; 1.3 paragraph style), 2 text size, 5 default
+// style (30 font, 40 size), 10 insets. 30/31/33 (fill, border, shadow) are copied as Goodnotes
+// writes them for a plain box. 32.1.3 is 8 bytes that look random (no hash matched) → random.
+const TEXT_SCHEMA = 35, INSET = 10, UNSET = -404;
+const u64 = v => BigInt.asUintN(64, BigInt(v)); // negative varints
+const white = () => pb().m(1, pb().f(1, 1).f(2, 1).f(3, 1));
+function textElement(e, id, hc, seq) {
+  const size = e.size * PT, w = e.w * PT, h = textHeight(e) * PT;
+  const run = pb().m(3, rgba(e.color)).f(40, size).u(60, u64(UNSET)).f(70, UNSET);
+  const para = pb().m(1, pb().m(1, new Uint8Array())).m(2, pb().u(1, u64(-1))).m(3, pb().u(1, u64(-1)).u(2, u64(-1)));
+  const content = pb().m(1, pb().s(1, e.text || '').m(2, run).m(3, para)).done();
+  const style = pb()
+    .m(1, pb().m(3, pb().f(4, 1)).s(30, 'Helvetica Neue').f(40, size).u(60, u64(-60)).f(70, -20))
+    .m(2, pb().m(1, pb().m(1, new Uint8Array())).m(2, new Uint8Array()).m(3, pb().u(1, u64(-1)).u(2, u64(-1))));
+  return pb().m(21, pb().s(1, id).u(2, TEXT_SCHEMA).m(3, hc).m(7, pb().m(1, clock(seq))).u(9, 1)
+    .m(20, pb().m(1, pb().f(1, e.x * PT - INSET).f(2, e.y * PT - INSET)).f(3, 1))
+    .m(21, pb().m(2, pb().f(1, w + 2 * INSET).f(2, 32).f(3, Infinity)))
+    .m(22, pb().m(1, new Uint8Array()))
+    .m(30, pb().m(1, white()))
+    .m(31, pb().m(2, pb().m(1, new Uint8Array())).m(3, white()))
+    .m(32, pb()
+      .m(1, pb().m(2, bv41(content)).m(3, crypto.getRandomValues(new Uint8Array(8))).u(4, 1))
+      .m(2, pb().f(1, w).f(2, h))
+      .m(5, style)
+      .m(10, pb().f(1, INSET).f(2, INSET).f(3, INSET).f(4, INSET))
+      .m(11, new Uint8Array())) // present on fixed-width boxes
+    .m(33, pb().m(1, pb().f(4, 0.2)).m(3, pb().f(2, 5))));
+}
+
 // ---------- whole document ----------
-export async function notebookToGoodnotes(doc) {
+// quiet: no progress toast (background copies for Google Drive)
+export async function notebookToGoodnotes(doc, { quiet = false } = {}) {
+  if (doc.kind === 'textdoc') return textDocToGoodnotes(doc, { quiet });
   const { jsPDF } = window.jspdf || {};
   if (!jsPDF) throw new Error('PDF-Bibliothek nicht geladen (offline?)');
-  toast('Goodnotes-Datei wird erstellt…', 0);
+  if (!quiet) toast('Goodnotes-Datei wird erstellt…', 0);
   const files = [];
   const device = (BigInt(rnd()) << 31n) | BigInt(rnd() >>> 1);
   let counter = Date.now();
@@ -166,13 +229,13 @@ export async function notebookToGoodnotes(doc) {
   const docId = uuid();
   const common = (m, a, b, c) => m.d(10, now()).s(11, uuid()).u(a, device).u(b, counter++).u(c, SCHEMA);
 
-  // 1) Backgrounds: one PDF, a page per note page (paper, template, background image, text boxes)
+  // 1) Backgrounds: one PDF, a page per note page (paper, template, background image)
   let pdf;
   for (const page of doc.pages) {
     const h = pageH(page), s = 2;
     const c = document.createElement('canvas');
     c.width = PAGE_W * s; c.height = Math.round(h * s);
-    const bgOnly = { ...page, elements: page.elements.filter(e => e.type === 'text') };
+    const bgOnly = { ...page, elements: [] };
     await renderPage(c.getContext('2d'), bgOnly, s);
     const fmt = [PAGE_W * PT, h * PT];
     if (!pdf) pdf = new jsPDF({ unit: 'pt', format: fmt, orientation: fmt[0] > fmt[1] ? 'l' : 'p', compress: true });
@@ -183,19 +246,26 @@ export async function notebookToGoodnotes(doc) {
   const bgAtt = uuid();
   files.push([`attachments/${bgAtt}`, bgPdf]);
 
-  const events = [], noteIndex = [], attIndex = [[bgAtt, `attachments/${bgAtt}`]];
+  // Record layout follows a document Goodnotes 6 wrote itself (same fields, same order of types).
+  const DEFAULT_PAPER = '5A53E89E-F4C2-4548-8DD3-E9DF9FB4592E'; // id Goodnotes uses in fields 3/7
+  const events = [], noteIndex = [], attIndex = [[bgAtt, `attachments/${bgAtt}`]], searchIndex = [];
   events.push(pb().s(1, docId).m(30, common(pb()
     .s(1, docId)
-    .m(2, pb().s(1, doc.name || 'BadNotes').m(2, clock(3)))
-    .m(3, pb().s(1, uuid()).m(2, clock(3)))
+    .m(2, pb().s(1, doc.name || 'Folio').m(2, clock()))
+    .m(3, pb().s(1, DEFAULT_PAPER).m(2, clock()))
     .m(6, pb().s(1, 'P').m(2, clock()))
-    .m(7, pb().s(1, uuid()).m(2, clock()))
-    .s(9, 'de_DE'), 13, 14, 20)
+    .m(7, pb().s(1, DEFAULT_PAPER).m(2, clock()))
+    .s(9, 'auto'), 13, 14, 20)
     .m(17, new Uint8Array()).m(18, new Uint8Array()).m(19, pb().m(2, clock()))));
-  // Title again as a rename record (type 31) — Goodnotes takes the current title from these
-  events.push(pb().s(1, docId).m(31, common(pb().s(1, docId).m(2, pb().s(1, doc.name || 'BadNotes').m(2, clock(6))), 13, 14, 15)));
-  events.push(pb().s(1, bgAtt).m(6, common(pb().s(1, bgAtt).s(2, bgAtt).u(5, bgPdf.length).s(6, docId), 14, 15, 16)
-    .m(12, pb().u(1, 1).u(2, doc.pages.length))));
+  // An attachment is announced (6), and Goodnotes indexes it for search (105, 103 + search file).
+  const attachment = (id, size) => {
+    events.push(pb().s(1, id).m(6, common(pb().s(1, id).s(2, id).u(5, size).s(6, docId), 14, 15, 16).m(12, new Uint8Array())));
+    events.push(pb().s(1, id).m(105, common(pb().s(2, docId).s(3, id), 13, 14, 15)));
+    events.push(pb().s(1, id).m(103, common(pb().s(1, id).s(2, docId).u(14, 1).s(16, uuid()), 18, 19, 20)));
+    files.push([`search/${id}`, stream([pb().u(2, 1).m(3, new Uint8Array())])]);
+    searchIndex.push(id);
+  };
+  attachment(bgAtt, bgPdf.length);
 
   // 2) Images used on pages → attachments (one per distinct image)
   const imageAtts = new Map();
@@ -206,8 +276,18 @@ export async function notebookToGoodnotes(doc) {
     imageAtts.set(e.src, id);
     files.push([`attachments/${id}`, bytes]);
     attIndex.push([id, `attachments/${id}`]);
-    events.push(pb().s(1, id).m(6, common(pb().s(1, id).s(2, id).u(5, bytes.length).s(6, docId), 14, 15, 16).m(12, new Uint8Array())));
+    attachment(id, bytes.length);
   }
+  // Fractional sort keys like Goodnotes' own ("42nWp", "A8Zo6"): 5 base-62 chars, evenly spaced,
+  // never ending in "0".
+  const B62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+  const sortKey = i => {
+    let n = Math.floor((i + 1) * (62 ** 5 - 1) / (doc.pages.length + 1)), k = '';
+    for (let d = 0; d < 5; d++) { k = B62[n % 62] + k; n = Math.floor(n / 62); }
+    return k.replace(/0+$/, '') || '1';
+  };
+  const sheetLists = [];
+  let elementSeq = 3_700_000; // header counter: small numbers in Goodnotes' own files
 
   // 3) Pages: background record, sheet record (sort key), notes file
   for (const [i, page] of doc.pages.entries()) {
@@ -218,34 +298,49 @@ export async function notebookToGoodnotes(doc) {
       .m(12, pb().m(2, clock())).m(13, pb().m(2, clock())).m(17, pb().m(2, clock())).m(19, pb().m(2, clock()))));
     events.push(pb().s(1, sid).m(54, common(pb().s(1, docId).s(2, sid)
       .m(3, pb().s(1, bgId).m(2, clock()))
-      .m(4, pb().s(1, 'a' + String(i).padStart(5, '0')).m(2, clock())), 13, 14, 15)
+      .m(4, pb().s(1, sortKey(i)).m(2, clock())), 13, 14, 15)
       .m(17, pb().m(1, pb().m(2, pb().m(1, rgba('#DDDDDD')).m(2, rgba('#FFFFFF')))).m(2, clock()))));
 
-    const recs = [];
+    // Image headers carry a second id (6) and their clock (2); the sheet's element list (record
+    // 106) repeats both, as in Goodnotes' own files. Strokes have neither.
+    const recs = [], members = [];
     let seq = 1;
     for (const e of page.elements) {
-      const id = uuid();
+      const id = uuid(), key = uuid(), hc = clock(seq);
       if (e.type === 'stroke') {
-        recs.push(pb().s(1, id).m(2, clock(seq)).u(8, device).u(9, counter++).u(14, 5381).u(16, SCHEMA));
+        recs.push(pb().s(1, id).m(2, hc).u(8, device).u(9, elementSeq++).u(14, 5381).u(16, SCHEMA));
         recs.push(pb().m(7, pb().s(1, id).m(2, bv41(strokeTpl(e))).u(3, 1)
           .m(4, rgba(e.color, e.tool === 'highlighter' ? 0.4 : 1))
           .m(6, new Uint8Array()).m(7, pb().m(1, clock(seq))).m(9, new Uint8Array())
           .m(15, clock(seq)).m(20, new Uint8Array()).u(21, SCHEMA)));
       } else if (e.type === 'image' && imageAtts.has(e.src)) {
         const ref = uuid(), x = e.x * PT, y = e.y * PT, iw = e.w * PT, ih = e.h * PT;
-        recs.push(pb().s(1, id).m(2, clock(seq)).s(4, ref).s(6, uuid()).s(7, imageAtts.get(e.src))
-          .u(8, device).u(9, counter++).s(11, uuid()).m(12, pb().s(1, uuid()).s(2, docId)).m(13, pb().s(1, uuid()).s(2, docId))
+        members.push(pb().s(1, key).m(2, hc));
+        recs.push(pb().s(1, id).m(2, hc).s(4, ref).s(6, key).s(7, imageAtts.get(e.src))
+          .u(8, device).u(9, elementSeq++).s(11, uuid()).m(12, pb().s(1, uuid()).s(2, docId)).m(13, pb().s(1, uuid()).s(2, docId))
           .u(14, 5381).u(16, SCHEMA));
         recs.push(pb().m(1, pb().s(1, id)
           .m(2, pb().m(1, pb().f(1, x).f(2, y)).m(2, pb().f(1, iw).f(2, ih)))
           .m(3, pb().m(1, pb().f(1, x + iw / 2).f(2, y + ih / 2)).m(2, pb().f(1, iw).f(2, ih)))
           .s(4, ref).m(5, pb().m(1, clock(seq))).m(15, clock(seq)).u(18, SCHEMA)));
+      } else if (e.type === 'text' && (e.text || '').trim()) {
+        recs.push(pb().s(1, id).m(2, hc).u(8, device).u(9, elementSeq++).u(14, 5381).u(16, TEXT_SCHEMA));
+        recs.push(textElement(e, id, hc, seq));
       }
       seq++;
     }
     files.push([`notes/${nid}`, stream(recs)]);
     noteIndex.push([nid, `notes/${nid}`]);
+    if (members.length) {
+      const list = pb().s(1, nid);
+      for (const m of members) list.m(2, m);
+      sheetLists.push(pb().s(1, nid).m(106, common(list, 13, 14, 15).s(16, docId)));
+    }
   }
+
+  // Element lists come after all sheets. No handwriting registration (104): Goodnotes pairs it
+  // with a search file for the page, and a page with an image showed up empty without one.
+  events.push(...sheetLists);
 
   // 4) Indexes and the rest of the package
   const index = list => stream(list.map(([id, path]) => pb().s(1, id).s(2, path)));
@@ -258,8 +353,121 @@ export async function notebookToGoodnotes(doc) {
     ['index.attachments.pb', index(attIndex)],
     ['index.events.pb', stream(events)],
     ['index.notes.pb', index(noteIndex)],
-    ['index.search.pb', new Uint8Array()],
+    ['index.search.pb', stream(searchIndex.map(id => pb().s(1, id).s(2, `search/${id}`).u(3, 1)))],
     ['schema.pb', pb().u(1, SCHEMA).done()],
+    ['thumbnail.jpg', thumbBytes],
+  );
+  return new Blob([zip(files)], { type: 'application/octet-stream' });
+}
+
+// ---------- text documents ----------
+// Layout of a Goodnotes text document (document type 5, record schema 31): one sheet on a
+// blank 834 × 1079 pt page, whose notes file holds one element with field 13 = { 1 id, 2 31,
+// 3 clock, 10 Yjs update, 11 Yjs state vector }. The Yjs document is what slate-yjs writes
+// for the Slate nodes Folio stores (see textdoc.js). Images are attachments (record 6 with
+// 17 = asset id) referred to as "app://api/attachments/<asset id>".
+const TD_SCHEMA = 31, TD_PAGE = [834.24, 1078.827];
+
+async function textDocToGoodnotes(doc, { quiet = false } = {}) {
+  const { jsPDF } = window.jspdf || {};
+  if (!jsPDF) throw new Error('PDF-Bibliothek nicht geladen (offline?)');
+  if (!quiet) toast('Goodnotes-Datei wird erstellt…', 0);
+  const { loadYjs, renderTextThumb } = await import('./textdoc.js');
+  const Y = await loadYjs();
+  const files = [], events = [], attIndex = [];
+  const device = (BigInt(rnd()) << 31n) | BigInt(rnd() >>> 1);
+  let counter = Date.now();
+  const now = () => Date.now() + Math.random();
+  const docId = uuid();
+  const common = (m, a, b, c, schema = SCHEMA) => m.d(10, now()).s(11, uuid()).u(a, device).u(b, counter++).u(c, schema);
+
+  // blank page background
+  const pdf = new jsPDF({ unit: 'pt', format: TD_PAGE, orientation: 'p', compress: true });
+  const bgPdf = new Uint8Array(pdf.output('arraybuffer'));
+  const bgAtt = uuid();
+  files.push([`attachments/${bgAtt}`, bgPdf]);
+  attIndex.push([bgAtt, `attachments/${bgAtt}`]);
+
+  // images → attachments with an asset id
+  const images = [];
+  const collect = n => { if (n.type === 'img' && n.src) images.push(n); (n.children || []).forEach(collect); };
+  doc.blocks.forEach(collect);
+  const assetOf = new Map();
+  for (const n of images) {
+    if (assetOf.has(n.src)) continue;
+    const bytes = new Uint8Array(await (await fetch(n.src)).arrayBuffer());
+    const att = uuid(), asset = uuid();
+    files.push([`attachments/${att}`, bytes]);
+    attIndex.push([att, `attachments/${att}`]);
+    assetOf.set(n.src, { att, asset, size: bytes.length });
+  }
+
+  // Slate nodes → Yjs (slate-yjs layout)
+  const ydoc = new Y.Doc();
+  const toDelta = nodes => nodes.flatMap(n => {
+    if (n.text !== undefined) {
+      const { text, ...marks } = n;
+      return text ? [Object.keys(marks).length ? { insert: text, attributes: marks } : { insert: text }] : [];
+    }
+    return [{ insert: toXml(n) }];
+  });
+  const toXml = n => {
+    const t = new Y.XmlText();
+    const { children, src, ...props } = n;
+    if (n.type === 'img' && src && assetOf.has(src)) props.url = `app://api/attachments/${assetOf.get(src).asset}`;
+    for (const [k, v] of Object.entries(props)) if (v !== undefined) t.setAttribute(k, v);
+    t.applyDelta(toDelta(children || []), { sanitize: false });
+    return t;
+  };
+  ydoc.get('content', Y.XmlText).applyDelta(toDelta(doc.blocks), { sanitize: false });
+  const update = Y.encodeStateAsUpdate(ydoc), stateVector = Y.encodeStateVector(ydoc);
+
+  const name = doc.name || 'Unbenanntes Textdokument';
+  const DEFAULT_PAPER = '5A53E89E-F4C2-4548-8DD3-E9DF9FB4592E';
+  events.push(pb().s(1, docId).m(30, common(pb()
+    .s(1, docId)
+    .m(2, pb().s(1, name).m(2, clock()))
+    .m(3, pb().s(1, DEFAULT_PAPER).m(2, clock()))
+    .m(6, pb().s(1, 'P').m(2, clock()))
+    .m(7, pb().s(1, DEFAULT_PAPER).m(2, clock()))
+    .s(9, 'auto'), 13, 14, 20, TD_SCHEMA)
+    .u(15, 5) // document type: text document
+    .m(17, new Uint8Array()).m(18, new Uint8Array()).m(19, pb().m(2, clock()))));
+  events.push(pb().s(1, bgAtt).m(6, common(pb().s(1, bgAtt).s(2, bgAtt).u(5, bgPdf.length).s(6, docId), 14, 15, 16).m(12, new Uint8Array())));
+  const bgId = uuid(), sid = sheetId(), nid = plusOne(sid);
+  events.push(pb().s(1, bgId).m(2, common(pb().s(1, docId).s(2, bgId).s(4, bgAtt).u(5, 1)
+    .m(8, pb().f(1, TD_PAGE[0]).f(2, TD_PAGE[1])), 15, 16, 21)
+    .m(12, pb().m(2, clock())).m(13, pb().m(2, clock())).m(17, pb().m(2, clock())).m(19, pb().m(2, clock()))));
+  events.push(pb().s(1, sid).m(54, common(pb().s(1, docId).s(2, sid)
+    .m(3, pb().s(1, bgId).m(2, clock()))
+    .m(4, pb().s(1, 'U').m(2, clock())), 13, 14, 15)
+    .m(17, pb().m(1, pb().m(2, pb().m(1, rgba('#DDDDDD')).m(2, rgba('#FFFFFF')))).m(2, clock()))));
+  events.push(pb().s(1, bgAtt).m(105, common(pb().s(2, docId).s(3, bgAtt), 13, 14, 15)));
+  events.push(pb().s(1, bgAtt).m(103, common(pb().s(1, bgAtt).s(2, docId).u(14, 1).s(16, uuid()), 18, 19, 20)));
+  for (const { att, asset, size } of assetOf.values()) {
+    events.push(pb().s(1, att).m(6, common(pb().s(1, att).s(2, att).u(5, size).s(6, docId), 14, 15, 16, TD_SCHEMA)
+      .m(12, pb().u(1, 1).u(2, 1)).s(17, asset)));
+  }
+  files.push([`search/${bgAtt}`, stream([pb().u(2, 1).m(3, new Uint8Array())])]);
+
+  // the notes file: header + text element
+  const elId = uuid(), hc = clock(1);
+  files.push([`notes/${nid}`, stream([
+    pb().s(1, elId).m(2, hc).u(8, device).u(9, 3_700_000).u(14, 5381).u(16, TD_SCHEMA),
+    pb().m(13, pb().s(1, elId).u(2, TD_SCHEMA).m(3, hc).m(10, update).m(11, stateVector)),
+  ])]);
+
+  const index = list => stream(list.map(([id, path]) => pb().s(1, id).s(2, path)));
+  const thumb = document.createElement('canvas');
+  renderTextThumb(thumb, doc, 300);
+  const thumbBytes = new Uint8Array(await (await fetch(thumb.toDataURL('image/jpeg', 0.85))).arrayBuffer());
+  files.push(
+    ['document.info.pb', pb().u(1, 5).done()],
+    ['index.attachments.pb', index(attIndex)],
+    ['index.events.pb', stream(events)],
+    ['index.notes.pb', index([[nid, `notes/${nid}`]])],
+    ['index.search.pb', stream([pb().s(1, bgAtt).s(2, `search/${bgAtt}`).u(3, 1)])],
+    ['schema.pb', pb().u(1, TD_SCHEMA).done()],
     ['thumbnail.jpg', thumbBytes],
   );
   return new Blob([zip(files)], { type: 'application/octet-stream' });
@@ -268,7 +476,7 @@ export async function notebookToGoodnotes(doc) {
 export async function exportGoodnotes(doc) {
   try {
     const blob = await notebookToGoodnotes(doc);
-    const name = (doc.name || 'BadNotes').replace(/[\\/:*?"<>|]/g, '_') + '.goodnotes';
+    const name = (doc.name || 'Folio').replace(/[\\/:*?"<>|]/g, '_') + '.goodnotes';
     const file = new File([blob], name, { type: 'application/octet-stream' });
     // iPad: share sheet ("In Goodnotes öffnen" / "In Dateien sichern"). iOS only opens it right
     // after a tap, and building the file takes too long for that — so ask for one more tap.

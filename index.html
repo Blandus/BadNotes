@@ -5,14 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="BadNotes">
+<meta name="apple-mobile-web-app-title" content="Folio">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="theme-color" content="#F2F2F7">
-<title>BadNotes</title>
+<meta name="theme-color" content="#FAF9F5">
+<meta name="description" content="Folio – Make space for ideas. Handschrift, PDFs und Textdokumente.">
+<title>Folio</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="style.css">
+<link rel="icon" type="image/svg+xml" href="folio-mark.svg">
 </head>
 <body>
 
@@ -26,10 +31,15 @@
 
 <section id="editor" class="view" hidden>
   <div class="tabbar" id="tabbar" hidden><div id="tabs" class="tabs"></div></div>
+  <!-- header: navigation and document actions -->
   <div class="toolbar">
     <div class="tb-group" id="tbLeft"></div>
+    <div class="tb-group right"><div id="undoPill" class="undo-group"></div><div class="tb-divider"></div><div class="tb-group-inner" id="tbRight"></div></div>
+  </div>
+  <!-- tool row: drawing · content · presentation tools, then the active tool's settings -->
+  <div class="toolrow">
     <div class="tb-tools" id="tbTools"></div>
-    <div class="tb-group right" id="tbRight"></div>
+    <div id="optbar" class="opt-pill"></div>
   </div>
   <div class="ed-body">
     <aside id="thumbs" class="thumbs" hidden></aside>
@@ -37,14 +47,14 @@
       <div id="scroller"><div id="pages"></div></div>
       <canvas id="ink"></canvas>
       <canvas id="overlay"></canvas>
-      <div id="undoPill" class="float-pill undo-pill"></div>
-      <div id="optbar" class="opt-pill"></div>
       <div id="pageInd" class="float-pill page-pill"></div>
       <div id="zoomPill" class="float-pill zoom-pill"></div>
     </div>
     <aside id="searchPanel" class="side-panel" hidden></aside>
   </div>
 </section>
+
+<section id="textdoc" class="view textdoc-view" hidden></section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>

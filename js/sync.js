@@ -1,5 +1,5 @@
 // Google Drive sync. Every record (notebook or folder) is stored as <id>.json in a
-// "BadNotes" folder (formerly "Notizen-App"); per record the newer version (by `updated`) wins.
+// "Folio" folder (older installs: "BadNotes" / "Notizen-App"); per record the newer version (by `updated`) wins.
 import { store, settings, saveSettings, emit } from './store.js';
 import { uid } from './util.js';
 
@@ -51,16 +51,16 @@ const enc = encodeURIComponent;
 const rUpd = f => +(f?.appProperties?.updated || 0);
 const recId = f => f.name.replace(/\.json$/, '');
 
-// All app folders ("BadNotes" / old "Notizen-App"), oldest first (two devices may each have created one on first sync).
+// All app folders ("Folio" / older "BadNotes", "Notizen-App"), oldest first (two devices may each have created one on first sync).
 // The oldest is where new files go; files in all of them are read.
 async function findFolders() {
-  // "Notizen-App" is the folder name used before the app was called BadNotes; it stays readable.
-  const q = "(name='BadNotes' or name='Notizen-App') and mimeType='application/vnd.google-apps.folder' and trashed=false";
+  // "BadNotes" and "Notizen-App" are folder names of earlier versions; they stay in use where they exist.
+  const q = "(name='Folio' or name='BadNotes' or name='Notizen-App') and mimeType='application/vnd.google-apps.folder' and trashed=false";
   const r = await (await gapi(`files?q=${enc(q)}&orderBy=createdTime&fields=files(id,createdTime)`)).json();
   if (r.files.length) return r.files.map(f => f.id);
   const f = await (await gapi('files?fields=id', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: 'BadNotes', mimeType: 'application/vnd.google-apps.folder' }),
+    body: JSON.stringify({ name: 'Folio', mimeType: 'application/vnd.google-apps.folder' }),
   })).json();
   return [f.id];
 }
@@ -111,6 +111,68 @@ async function pushIfNewer(rec, folders) {
   return true;
 }
 
+const trash = id => gapi(`files/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) });
+
+// ---------- Goodnotes copies ----------
+// Optional (settings.gnCopies, on by default): one .goodnotes file per notebook in the Drive
+// folder "<app folder>/Goodnotes", for opening in Goodnotes (Files app → Google Drive). Each copy
+// remembers its notebook and version (appProperties gnFor / updated). A copy is rebuilt once its
+// notebook has not changed for a minute, renamed with it, and trashed when the notebook is
+// deleted. Building is slow (backgrounds are rendered), so only a few are built per sync run.
+const GN_FOLDER = 'Goodnotes', GN_QUIET_MS = 60000, GN_PER_RUN = 3;
+const gnName = r => (r.name || 'Folio').replace(/[\\/:*?"<>|]/g, '_') + '.goodnotes';
+
+async function gnFolder(parent) {
+  const q = `name='${GN_FOLDER}' and mimeType='application/vnd.google-apps.folder' and '${parent}' in parents and trashed=false`;
+  const r = await (await gapi(`files?q=${enc(q)}&orderBy=createdTime&fields=files(id)`)).json();
+  if (r.files.length) return r.files[0].id;
+  const f = await (await gapi('files?fields=id', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: GN_FOLDER, mimeType: 'application/vnd.google-apps.folder', parents: [parent] }),
+  })).json();
+  return f.id;
+}
+
+// Returns the number of copies written.
+export async function syncGoodnotesCopies(folders, local) {
+  const dir = await gnFolder(folders[0]);
+  const copies = new Map();
+  for (const f of await listFiles(`'${dir}' in parents and trashed=false`)) {
+    const id = f.appProperties?.gnFor;
+    if (!id) continue;
+    const cur = copies.get(id);
+    if (cur && rUpd(cur) >= rUpd(f)) { await trash(f.id); continue; } // two devices wrote one each
+    if (cur) await trash(cur.id);
+    copies.set(id, f);
+  }
+  const { notebookToGoodnotes } = await import('./goodnotes-export.js');
+  let built = 0;
+  for (const r of local.values()) {
+    if (r.kind !== 'notebook' && r.kind !== 'textdoc') continue;
+    const copy = copies.get(r.id);
+    if (r.deleted || r.trashed) { if (copy) await trash(copy.id); continue; }
+    if (copy && rUpd(copy) >= r.updated) {
+      if (copy.name !== gnName(r)) {
+        await gapi(`files/${copy.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: gnName(r) }) });
+      }
+      continue;
+    }
+    if (Date.now() - r.updated < GN_QUIET_MS || built >= GN_PER_RUN) continue;
+    const blob = await notebookToGoodnotes(r, { quiet: true });
+    const props = { gnFor: r.id, updated: String(r.updated) };
+    const meta = copy ? { name: gnName(r), appProperties: props } : { name: gnName(r), parents: [dir], appProperties: props };
+    const b = 'bnd' + uid();
+    const body = new Blob([
+      `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: application/octet-stream\r\n\r\n`,
+      blob, `\r\n--${b}--`]);
+    await gapi(`https://www.googleapis.com/upload/drive/v3/files${copy ? '/' + copy.id : ''}?uploadType=multipart&fields=id`, {
+      method: copy ? 'PATCH' : 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + b }, body,
+    });
+    built++;
+  }
+  return built;
+}
+
 // ---------- Duplicate merging (pure, deterministic) ----------
 // Both devices must make the same decision, so the record with the smallest id is always kept.
 const contentKey = pages => JSON.stringify(pages, (k, v) => (k === 'id' ? undefined : v));
@@ -150,7 +212,8 @@ export async function sync(interactive) {
     setStatus('Synchronisiere…');
     await beforeSync();
     const folders = await findFolders();
-    const { byId: remote, dupes } = pickNewest(await listFiles(`${inFolders(folders)} and trashed=false`));
+    // only record files (the folder also holds the "Goodnotes" sub-folder)
+    const { byId: remote, dupes } = pickNewest((await listFiles(`${inFolders(folders)} and trashed=false`)).filter(f => f.name.endsWith('.json')));
 
     const local = new Map((await store.all()).map(n => [n.id, n]));
     let down = 0, up = 0;
@@ -176,12 +239,16 @@ export async function sync(interactive) {
       for (const r of merged) { emit('remote', r.id); if (await pushIfNewer(r, folders)) up++; }
     }
     // Older duplicate copies of a file go to Drive's trash.
-    for (const d of dupes) if (rUpd(d) <= rUpd(remote.get(recId(d)))) {
-      await gapi(`files/${d.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) });
+    for (const d of dupes) if (rUpd(d) <= rUpd(remote.get(recId(d)))) await trash(d.id);
+    let gnNote = '';
+    if (settings.gnCopies !== false) {
+      setStatus('Goodnotes-Kopien…');
+      try { const n = await syncGoodnotesCopies(folders, local); if (n) gnNote = ` · ${n} Goodnotes-Kopie(n)`; }
+      catch (err) { gnNote = ' · ⚠ Goodnotes-Kopie: ' + err.message; }
     }
     const time = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
     const fixed = merged.length ? ` · ${merged.filter(r => r.deleted).length} Duplikat(e) zusammengeführt` : '';
-    setStatus(`Synchronisiert ${time}${up || down ? ` · ↑${up} ↓${down}` : ''}${fixed}`);
+    setStatus(`Synchronisiert ${time}${up || down ? ` · ↑${up} ↓${down}` : ''}${fixed}${gnNote}`);
   } catch (err) {
     setStatus('⚠ ' + err.message);
   } finally {

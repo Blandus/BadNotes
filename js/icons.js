@@ -56,6 +56,14 @@ const P = {
   selectCircle: '<circle cx="12" cy="12" r="8.5"/><path d="M8.3 12.2l2.6 2.6 4.8-5"/>',
   favorites: '<path d="M6.5 3.5h11v17l-5.5-3.8-5.5 3.8z"/><path d="M12 7.3l1.1 2.2 2.4.3-1.8 1.7.4 2.4-2.1-1.1-2.1 1.1.4-2.4-1.8-1.7 2.4-.3z"/>',
   zoom: '<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5M8 10.5h5M10.5 8v5"/>',
+  notes: '<rect x="4.5" y="3.5" width="15" height="17" rx="2.5"/><path d="M8.5 8h7M8.5 12h7M8.5 16h4"/>',
+  dots: '<circle cx="6" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="18" cy="12" r="1.3" fill="currentColor" stroke="none"/>',
+  dotsV: '<circle cx="12" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="12" cy="18" r="1.3" fill="currentColor" stroke="none"/>',
+  textdoc: '<path d="M6 3.5h8.2l3.8 3.8v13.2H6z"/><path d="M14 3.5v4h4M9 11.5h6M9 14.5h6M9 17.5h3.5"/>',
+  arrowLeft: '<path d="M19 12H5M11 6l-6 6 6 6"/>',
+  scan: '<path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><rect x="8" y="7.5" width="8" height="9" rx="1.2"/><path d="M10 10.5h4M10 13.5h3"/>',
+  camera: '<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.3l1.4-2h5.6l1.4 2h2.3A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="12.8" r="3.4"/>',
+  download: '<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5"/><path d="M5 19.5h14"/>',
 };
 
 export function icon(name, size = 22) {
@@ -66,5 +74,19 @@ export function icon(name, size = 22) {
   s.setAttribute('stroke-width', '1.7'); s.setAttribute('stroke-linecap', 'round'); s.setAttribute('stroke-linejoin', 'round');
   s.setAttribute('aria-hidden', 'true');
   s.innerHTML = P[name] || '';
+  return s;
+}
+
+// Folio mark (same artwork as folio-mark.svg). The front layer and its fold follow the theme
+// via --logo-front / --logo-fold, so the mark stays visible on dark backgrounds.
+export function folioMark(size = 32) {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('viewBox', '0 0 64 64');
+  s.setAttribute('width', size); s.setAttribute('height', size);
+  s.setAttribute('class', 'folio-mark'); s.setAttribute('aria-hidden', 'true');
+  s.innerHTML = '<rect x="8" y="12" width="28" height="40" rx="6" fill="#8EB8E6" transform="rotate(-20 22 32)"/>'
+    + '<rect x="16" y="11" width="28" height="40" rx="6" fill="#6B8F7E" transform="rotate(-6 30 31)"/>'
+    + '<g transform="rotate(8 40 36)"><path d="M30 14H43L54 25V50a6 6 0 0 1-6 6H30a6 6 0 0 1-6-6V20a6 6 0 0 1 6-6Z" fill="var(--logo-front, #0F2747)"/>'
+    + '<path d="M43 14V21.5a3.5 3.5 0 0 0 3.5 3.5H54Z" fill="var(--logo-fold, #FAF9F5)"/></g>';
   return s;
 }

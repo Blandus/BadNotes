@@ -5,18 +5,21 @@
 //     30/31  document (2.1 = title)            6  attachment (2 = file id)
 //      2     page background: 4 = attachment (PDF), 5 = page number, 8 = size in points
 //     54     sheet: 3.1 = page background id, 4.1 = sort key (fractional index, byte order)
+//      3     sheet background changed later: 2 = sheet, 3.1 = new page background id
 // - notes/<id> holds one sheet's ink (id = sheet id with the last hex digit + 1). Records with
 //   field 7 are elements: 1 id, 2 geometry blob, 4 colour RGBA (floats), 6 offset (x, y),
-//   9 shape (9.1 points, 9.15 width), 14 = 1 → deleted. Images: see sheetElements().
+//   9 shape (9.1 points, 9.15 width), 14 = 1 → deleted. Images and text boxes (field 21):
+//   see sheetElements() and convertText().
 // - The geometry blob is Apple LZ4 ("bv41") wrapping a "tpl" serialisation
-//   "vA(v)A(u)A(u)A(v)A(v)A(u)A(u)A(u)A(u)A(v)": #2 start point (x, y, pressure),
-//   #3 per segment a control point and an end point (x, y, pressure) of a quadratic curve,
-//   #8 points of the rendered ink shape (x, y) — used here only to measure the stroke width.
-// Strokes are imported as centre line + pressure + width, so they behave exactly like strokes
-// drawn in BadNotes (erasing, lasso, recolouring, sync).
+//   "vA(v)A(u)A(u)A(v)A(v)A(u)A(u)A(u)A(u)A(v)": #2 start point (x, y, r),
+//   #3 per segment a control point and an end point (x, y, r) of a quadratic curve, r = half
+//   width in points; #4/#5/#8 the ink outline (commands per segment, commands, points).
+// Strokes are imported as centre line + radius per point — the model Folio itself uses —
+// so they behave exactly like strokes drawn in Folio (erasing, lasso, recolouring, sync).
 import { PAGE_W, newPage } from './store.js';
 import { uid, r1 } from './util.js';
 import { toast } from './ui.js';
+import { loadYjs } from './textdoc.js';
 
 // ---------- ZIP (central directory + DecompressionStream) ----------
 async function unzip(buf) {
@@ -149,28 +152,72 @@ function convertElement(m, k) {
   const [, , start, segs, , , , , outline] = items;
   if (!start?.length || !outline?.length) return null;
 
-  // Centre line: start point, then each segment's quadratic curve sampled at t = .5 and 1
-  const line = [[...P(start[0], start[1]), r1(start[2])]];
-  let prev = start;
-  for (let s = 0; s + 5 < segs.length; s += 6) {
-    const cx = segs[s], cy = segs[s + 1], ex = segs[s + 3], ey = segs[s + 4], ep = segs[s + 5];
-    const mx = 0.25 * prev[0] + 0.5 * cx + 0.25 * ex, my = 0.25 * prev[1] + 0.5 * cy + 0.25 * ey;
-    line.push([...P(mx, my), r1((prev[2] + ep) / 2)], [...P(ex, ey), r1(ep)]);
-    prev = [ex, ey, ep];
+  // Centre line → Folio points. Folio draws quadratic pieces from midpoint to midpoint
+  // with its points as controls, and Goodnotes' pieces are nearly that (each end ≈ midpoint of
+  // the neighbouring controls), so the controls become the points (plus the final end). A line
+  // made only of straight pieces (control = midpoint of its ends, e.g. shapes) keeps its piece
+  // ends instead, so corners stay sharp. The third value of every point is the half width.
+  const pieces = [];
+  for (let s = 0, prev = start; s + 5 < segs.length; s += 6) {
+    const c = segs.slice(s, s + 3), e = segs.slice(s + 3, s + 6);
+    pieces.push({ c, e, straight: Math.hypot(c[0] - (prev[0] + e[0]) / 2, c[1] - (prev[1] + e[1]) / 2) < 0.01 });
+    prev = e;
   }
-  // Stroke width from the outline: twice the median distance of the outline points to the centre
-  // line (outline points sit on the stroke's edges; the median ignores the few cap points).
-  const ds = [];
-  for (let q = 0; q + 1 < outline.length; q += 2) {
-    const [x, y] = P(outline[q], outline[q + 1]);
-    let best = Infinity;
-    for (let i = 1; i < line.length; i++) best = Math.min(best, segDist([x, y], line[i - 1], line[i]));
-    if (line.length === 1) best = Math.hypot(x - line[0][0], y - line[0][1]);
-    ds.push(best);
+  const polyline = pieces.every(q => q.straight);
+  const line = [[...P(start[0], start[1]), start[2]]];
+  pieces.forEach(({ c, e, straight }, i) => {
+    const last = i === pieces.length - 1;
+    // Folio ends its lines with a straight piece; its control is not a point of the line
+    if (!polyline && !(last && straight)) line.push([...P(c[0], c[1]), c[2]]);
+    if (polyline || last) line.push([...P(e[0], e[1]), e[2]]);
+  });
+  const rs = line.map(p => p[2]).filter(r => r > 0).sort((a, b) => a - b);
+  let med = rs[Math.floor(rs.length / 2)];
+  if (!med) {
+    // no radii: fall back to the outline (median distance of its points to the centre line)
+    const ds = [];
+    for (let q = 0; q + 1 < outline.length; q += 2) {
+      const [x, y] = P(outline[q], outline[q + 1]);
+      let best = Infinity;
+      for (let i = 1; i < line.length; i++) best = Math.min(best, segDist([x, y], line[i - 1], line[i]));
+      if (line.length === 1) best = Math.hypot(x - line[0][0], y - line[0][1]);
+      ds.push(best);
+    }
+    ds.sort((a, b) => a - b);
+    med = (ds[Math.floor(ds.length / 2)] || 0.5) / k;
   }
-  ds.sort((a, b) => a - b);
-  const width = Math.max(0.6, r1(2 * (ds[Math.floor(ds.length / 2)] || 0.5)));
-  return { id: uid(), type: 'stroke', tool, pen: 'ball', color, width, points: line };
+  const width = Math.max(0.6, r1(2 * med * k));
+  // Pen strokes keep the radius per point (Folio stores strokes the same way, see ink.js);
+  // highlighters have one constant width.
+  const pen = tool === 'pen';
+  for (const p of line) p[2] = pen ? Math.round((p[2] > 0 ? p[2] : med) * k * 100) / 100 : 0.5;
+  return { id: uid(), type: 'stroke', tool, pen: 'ball', color, width, points: line, ...(pen ? { rad: 1 } : {}) };
+}
+
+// Text box (element field 21): 20.1 top-left of the box, 20.3 scale; 32.1.2 the text as
+// Apple-LZ4 protobuf (1.1 text, 1.2 style run: 3 colour, 40 size, negative = default),
+// 32.2 text size (w, h), 32.5.1 default style (3 colour, 40 size), 32.10 insets.
+// One colour and size per box (the first run's), as Folio text boxes have.
+function convertText(t, k, headers) {
+  const head = headers.get(str(one(t, 1)));
+  if (head?.deleted) return null;
+  const place = sub(t, 20), o = sub(place, 1), scale = one(place, 3) || 1;
+  const box = sub(t, 32), content = sub(box, 1), blob = one(content, 2);
+  if (!(blob instanceof Uint8Array)) return null;
+  const body = sub(msg(blob[0] === 0x62 ? bv41(blob) : blob), 1);
+  const text = (str(one(body, 1)) || '').normalize('NFC');
+  if (!text.trim()) return null;
+  const run = sub(body, 2), def = sub(sub(box, 5), 1);
+  const runSize = one(run, 40), size = (runSize > 0 ? runSize : one(def, 40) || 24) * scale;
+  const c = run.has(3) ? sub(run, 3) : sub(def, 3);
+  const color = '#' + hex(one(c, 1)) + hex(one(c, 2)) + hex(one(c, 3));
+  const ins = sub(box, 10), dim = sub(box, 2);
+  const x = (one(o, 1) || 0) + (one(ins, 2) ?? 10) * scale, y = (one(o, 2) || 0) + (one(ins, 1) ?? 10) * scale;
+  // 21.2 = fixed width {box width, …}; 21.3 = grows with the text up to {min, max, …} → no
+  // wrapping in Folio either (its font is a little wider than Helvetica)
+  const sizing = sub(t, 21), auto = sub(sizing, 3);
+  const w = (auto.size ? Math.max(one(auto, 2) || 600, one(dim, 1) || 0) : (one(dim, 1) || 200)) * scale;
+  return { id: uid(), type: 'text', x: r1(x * k), y: r1(y * k), w: r1(w * k), size: r1(size * k), color, text };
 }
 
 // A notes file alternates header records (1 id, 2 clock, 3 present → deleted, 7 attachment id
@@ -198,6 +245,9 @@ async function sheetElements(bytes, k, imageSrc) {
         const w = one(s, 1), h = one(s, 2);
         const src = w && h && await imageSrc(head.att);
         if (src) els.push({ id: uid(), type: 'image', src, x: r1((one(o, 1) || 0) * k), y: r1((one(o, 2) || 0) * k), w: r1(w * k), h: r1(h * k) });
+      } else if (!m.has(2) && one(m, 21) instanceof Uint8Array) {
+        const t = convertText(msg(one(m, 21)), k, headers);
+        if (t) els.push(t);
       }
     } catch {}
   }
@@ -222,6 +272,43 @@ async function pdfPageImage(bytes, n, key) {
   return c.toDataURL('image/jpeg', 0.85);
 }
 
+// ---------- Text documents ----------
+// Document type 5 (record 30, field 15). Its one notes file holds an element with field 13:
+// 10 = a Yjs update of a slate-yjs document (root XmlText "content"; every Slate element is an
+// embedded XmlText whose attributes are the element's props, text is inserted with the marks
+// as formatting), 11 = its state vector. Images refer to "app://api/attachments/<asset id>";
+// the asset id is field 17 of the attachment record (6).
+async function textDocBlocks(read, notesIdx, imageSrc, assets) {
+  const Y = await loadYjs();
+  for (const path of notesIdx.values()) {
+    const b = await read(path);
+    if (!b?.length) continue;
+    for (const r of records(b)) {
+      const m = msg(r), el = one(m, 13);
+      if (!(el instanceof Uint8Array)) continue;
+      const update = one(msg(el), 10);
+      if (!(update instanceof Uint8Array)) continue;
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, update);
+      const toNodes = t => t.toDelta().map(d => (d.insert instanceof Y.XmlText ? toElement(d.insert) : { text: String(d.insert), ...(d.attributes || {}) }));
+      const toElement = t => { const kids = toNodes(t); return { ...t.getAttributes(), children: kids.length ? kids : [{ text: '' }] }; };
+      const blocks = toNodes(doc.get('content', Y.XmlText)).filter(n => n.type);
+      // images: attachment → data URL (the Goodnotes url is not kept; export makes new ones)
+      const walk = async n => {
+        if (n.type === 'img' && n.url) {
+          const asset = String(n.url).split('/').pop();
+          n.src = await imageSrc(assets.get(asset) || asset);
+          delete n.url;
+        }
+        for (const c of n.children || []) await walk(c);
+      };
+      for (const n of blocks) await walk(n);
+      return blocks.length ? blocks : null;
+    }
+  }
+  return null;
+}
+
 // ---------- Whole document ----------
 export async function goodnotesToNotebook(file) {
   toast('Goodnotes-Datei wird gelesen…', 0);
@@ -236,8 +323,9 @@ export async function goodnotesToNotebook(file) {
   const events = await read('index.events.pb');
   if (!events) throw new Error('Unbekanntes Goodnotes-Format (index.events.pb fehlt)');
 
-  let title = file.name?.replace(/\.goodnotes$/i, '') || 'Goodnotes-Import';
-  const bgs = new Map(), sheets = new Map(), attFile = new Map();
+  let title = file.name?.replace(/\.goodnotes$/i, '') || 'Goodnotes-Import', textDoc = false;
+  const assets = new Map(); // asset id (used in text documents' image urls) → attachment id
+  const bgs = new Map(), sheets = new Map(), attFile = new Map(), newBg = new Map();
   for (const r of records(events)) {
     const m = msg(r);
     for (const [type, vals] of m) {
@@ -245,14 +333,18 @@ export async function goodnotesToNotebook(file) {
       const v = vals[vals.length - 1];
       if (!(v instanceof Uint8Array)) continue;
       const x = msg(v);
-      if (type === 30 || type === 31) { const t = str(one(sub(x, 2), 1)); if (t) title = t; }
-      else if (type === 6) attFile.set(str(one(x, 1)), str(one(x, 2)));
+      if (type === 30 || type === 31) { const t = str(one(sub(x, 2), 1)); if (t) title = t; if (type === 30 && one(x, 15) === 5) textDoc = true; }
+      else if (type === 6) { attFile.set(str(one(x, 1)), str(one(x, 2))); if (str(one(x, 17))) assets.set(str(one(x, 17)), str(one(x, 1))); }
       else if (type === 2) {
         const size = sub(x, 8);
         bgs.set(str(one(x, 2)), { att: str(one(x, 4)), page: one(x, 5) || 1, w: one(size, 1) || 595, h: one(size, 2) || 842 });
       } else if (type === 54) {
         const id = str(one(x, 2));
-        sheets.set(id, { id, bg: str(one(sub(x, 3), 1)), order: str(one(sub(x, 4), 1)) || '' });
+        sheets.set(id, { id, bg: newBg.get(id) || str(one(sub(x, 3), 1)), order: str(one(sub(x, 4), 1)) || '' });
+      } else if (type === 3) {
+        // later change of a sheet's background (e.g. other paper/format): 2 sheet, 3.1 background
+        const id = str(one(x, 2)), bg = str(one(sub(x, 3), 1));
+        if (id && bg) { newBg.set(id, bg); if (sheets.has(id)) sheets.get(id).bg = bg; }
       }
     }
   }
@@ -282,6 +374,12 @@ export async function goodnotesToNotebook(file) {
     return imgCache.get(id);
   };
 
+  if (textDoc) {
+    const blocks = await textDocBlocks(read, notesIdx, imageSrc, assets);
+    toast('Textdokument importiert');
+    return { name: title.normalize('NFC'), blocks };
+  }
+
   const pages = [];
   for (const [i, s] of ordered.entries()) {
     toast(`Goodnotes-Import: Seite ${i + 1} von ${ordered.length}`, 0);
@@ -303,8 +401,8 @@ export async function goodnotesToNotebook(file) {
     pages.push(page);
   }
   if (!pages.length) throw new Error('Keine Seiten in der Goodnotes-Datei gefunden');
-  const all = pages.flatMap(p => p.elements), images = all.filter(e => e.type === 'image').length;
-  toast(`${pages.length} Seiten · ${all.length - images} Striche${images ? ` · ${images} Bilder` : ''} importiert`);
+  const all = pages.flatMap(p => p.elements), images = all.filter(e => e.type === 'image').length, texts = all.filter(e => e.type === 'text').length;
+  toast(`${pages.length} Seiten · ${all.length - images - texts} Striche${images ? ` · ${images} Bilder` : ''}${texts ? ` · ${texts} Textfelder` : ''} importiert`);
   // Apple stores "Ü" as U + combining diaeresis; normalise so search and sorting work
   return { name: title.normalize('NFC'), pages };
 }

@@ -6,6 +6,7 @@ import { icon } from './icons.js';
 import { initEditor, activateTab, flushSave, isLocked, ed } from './editor.js';
 import { initTools } from './tools.js';
 import { configureSync, scheduleSync } from './sync.js';
+import { openTextDoc, textLocked } from './textdoc.js';
 
 // Sample content on first start, so every view has something to show.
 async function seed() {
@@ -55,7 +56,7 @@ document.addEventListener('drop', e => {
   importPdfFile(pdfs[0]);
 });
 
-// After the shortcut "In BadNotes öffnen" has been used once, coming back to the app shows a
+// After the shortcut "In Folio öffnen" has been used once, coming back to the app shows a
 // one-tap import button for a few seconds (reading the clipboard needs a tap on iOS).
 let clipHint = null;
 function offerClipboardImport() {
@@ -74,10 +75,11 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   await store.open();
   initEditor();
   initTools();
-  configureSync({ beforeSync: flushSave, isLocked });
+  configureSync({ beforeSync: flushSave, isLocked: id => isLocked(id) || textLocked(id) });
   bus.addEventListener('change', scheduleSync);
   await seed();
-  if (ed.tab && settings.activeTab) activateTab(ed.tab);
+  if (settings.openText) openTextDoc(settings.openText);
+  else if (ed.tab && settings.activeTab) activateTab(ed.tab);
   else renderLibrary();
   offerClipboardImport();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});

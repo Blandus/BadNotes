@@ -2,12 +2,13 @@
 import { $, h, uid, r1 } from './util.js';
 import { icon } from './icons.js';
 import { settings, PAGE_W } from './store.js';
-import { bbox, unionBox, transformEl, drawStroke, pageH, renderPage, FONT, LINE_H, pieceWidth } from './render.js';
+import { bbox, unionBox, transformEl, drawStroke, pageH, renderPage, LINE_H, pieceWidth, toRadius, fontFamily } from './render.js';
 import {
   ed, T, sc, commit, renderEl, elForPage, setZoom, undo, redo, selectTool, renderOptions,
   scrollToPage, currentPage, toggleSearch, PALETTE,
 } from './editor.js';
 import { toast, popover, closePopover } from './ui.js';
+import { readRunsDom, renderRunsDom, selectionOffsets, setSelectionOffsets, styleAtPos, applyRange, normalize, runsOf } from './richtext.js';
 
 let overlay, octx;
 let drawing = null;
@@ -499,6 +500,7 @@ function finish(ok) {
     let s = d.straight ? d.stroke : { ...d.stroke, points: finishPoints(d) };
     const snap = d.snapped || (d.shapes && recognize(s.points));
     if (snap) s = toShape(s, snap);
+    else s = toRadius(s); // stored like Goodnotes: half width per point
     if (snap) clearInk(); // the snapped shape differs from the rough live stroke
     // Pen gestures: scribble over something to erase it
     if (!snap && s.tool === 'pen' && !d.shapes && T.pen.scribble && isScribble(s.points)) {
@@ -833,50 +835,97 @@ function textAt(pageEl, pt) {
   editText(pageEl, {
     id: uid(), type: 'text', x: pt[0], y: Math.max(0, pt[1] - cfg.size * 0.65),
     w: Math.max(160, Math.min(560, PAGE_W - pt[0] - 30)), size: cfg.size, color: cfg.colors[cfg.color], text: '',
+    ...(cfg.bold ? { bold: true } : {}), ...(cfg.italic ? { italic: true } : {}), ...(cfg.font && cfg.font !== 'sans' ? { font: cfg.font } : {}),
   }, true);
 }
 
+// Text box editing: a contenteditable box with one span per run (see richtext.js). Size, bold,
+// italic, font and colour apply to the selected characters, or to the whole box when nothing
+// is selected.
 function editText(pageEl, t, isNew) {
   const page = pageEl._page;
-  const ta = h('textarea', { class: 'text-editor', spellcheck: 'true', 'aria-label': 'Text' });
-  ta.value = t.text;
+  const box = h('div', { class: 'text-editor', contenteditable: 'true', spellcheck: 'true', 'aria-label': 'Text', role: 'textbox', 'aria-multiline': 'true' });
+  const scale = () => st.pageEl.clientWidth / PAGE_W;
   const st = {
-    page, pageEl, id: t.id, orig: t, el: t, isNew, ta,
+    page, pageEl, id: t.id, orig: t, el: t, isNew, box, sel: null,
     place() {
-      const k = st.pageEl.clientWidth / PAGE_W, ph = pageH(page);
-      Object.assign(ta.style, {
+      const ph = pageH(page);
+      Object.assign(box.style, {
         left: st.el.x / PAGE_W * 100 + '%', top: st.el.y / ph * 100 + '%', width: st.el.w / PAGE_W * 100 + '%',
-        fontSize: st.el.size * k + 'px', lineHeight: LINE_H, color: st.el.color, fontFamily: FONT,
+        fontSize: st.el.size * scale() + 'px', lineHeight: LINE_H, color: st.el.color, fontFamily: fontFamily(st.el),
+        fontWeight: st.el.bold ? '700' : '400', fontStyle: st.el.italic ? 'italic' : 'normal',
       });
-      ta.style.height = 'auto';
-      ta.style.height = ta.scrollHeight + 'px';
+      // zoom changed: run sizes follow
+      for (const s of box.querySelectorAll('[data-run]')) s.style.fontSize = (+s.dataset.size || st.el.size) * scale() + 'px';
     },
-    setColor(c) { st.el = { ...st.el, color: c }; st.place(); },
-    setSize(s) { st.el = { ...st.el, size: s }; st.place(); },
+    sync() { st.el = readRunsDom(box, st.el); },
+    redraw(a, b) { renderRunsDom(box, st.el, scale()); st.place(); if (a != null) setSelectionOffsets(box, a, b); },
+    // style of the selection start (shown in the bar)
+    current() { st.sync(); const o = st.sel || [st.el.text.length, st.el.text.length]; return styleAtPos(st.el, o[0] === o[1] ? o[0] : o[0] + 1); },
+    setStyle(patch) {
+      st.sync();
+      const o = st.sel;
+      if (o && o[1] > o[0]) st.el = applyRange(st.el, o[0], o[1], patch);
+      else st.el = normalize({ ...st.el, ...patch }, runsOf(st.el).map(r => { const n = { ...r }; for (const k of Object.keys(patch)) delete n[k]; return n; }));
+      st.redraw(...(o || []));
+      box.focus();
+    },
+    setColor(c) { st.setStyle({ color: c }); },
+    setSize(s) { st.setStyle({ size: s }); },
   };
   ed.editing = st;
-  pageEl.append(ta);
-  st.place();
-  ta.addEventListener('input', () => st.place());
-  ta.addEventListener('blur', () => finishText());
-  ta.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Escape') { e.preventDefault(); ta.blur(); } });
+  pageEl.append(box);
+  st.redraw();
+  box.addEventListener('input', () => { if (!box.firstChild) box.append(h('br')); });
+  box.addEventListener('blur', () => finishText());
+  box.addEventListener('keydown', e => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); box.blur(); }
+    // line breaks as text (no <div>s), so the box stays one run list
+    if (e.key === 'Enter') { e.preventDefault(); document.execCommand('insertText', false, '\n'); }
+    if ((e.ctrlKey || e.metaKey) && /^[bi]$/i.test(e.key)) {
+      e.preventDefault();
+      const cur = st.current(), k = e.key.toLowerCase() === 'b' ? 'bold' : 'italic';
+      st.setStyle({ [k]: !cur[k] }); renderOptions();
+    }
+  });
+  box.addEventListener('paste', e => { e.preventDefault(); document.execCommand('insertText', false, e.clipboardData.getData('text/plain')); });
   renderEl(pageEl); // hides the canvas copy while editing
-  ta.focus();
+  box.focus();
+  setSelectionOffsets(box, st.el.text.length, st.el.text.length);
+  renderOptions(); // the bar shows the style at the cursor
 }
+// Remember the selection inside the box (toolbar taps must not lose it) and refresh the bar.
+document.addEventListener('selectionchange', () => {
+  const st = ed.editing;
+  if (!st) return;
+  const o = selectionOffsets(st.box);
+  if (!o) return;
+  const changed = !st.sel || st.sel[0] !== o[0] || st.sel[1] !== o[1];
+  st.sel = o;
+  if (changed) renderOptions();
+});
 
 export async function finishText() {
   const st = ed.editing;
   if (!st) return;
+  st.sync();
   ed.editing = null;
-  const text = st.ta.value.replace(/\s+$/, '');
-  st.ta.remove();
-  const page = st.page, next = { ...st.el, text };
+  st.box.remove();
+  renderOptions();
+  const page = st.page;
+  // trailing whitespace is not kept
+  const trimmed = st.el.text.replace(/\s+$/, '');
+  let left = trimmed.length;
+  const next = trimmed === st.el.text ? st.el
+    : normalize(st.el, runsOf(st.el).map(r => { const take = Math.max(0, Math.min(r.text.length, left)); left -= take; return { ...r, text: r.text.slice(0, take) }; }));
+  const text = next.text;
   if (st.isNew) {
     if (text.trim()) commit(page, [...page.elements, next]);
     else renderEl(st.pageEl);
   } else if (!text.trim()) {
     commit(page, page.elements.filter(e => e.id !== st.id));
-  } else if (text !== st.orig.text || next.color !== st.orig.color || next.size !== st.orig.size) {
+  } else if (JSON.stringify(next) !== JSON.stringify(st.orig)) {
     commit(page, page.elements.map(e => e.id === st.id ? next : e));
   } else renderEl(st.pageEl);
 }

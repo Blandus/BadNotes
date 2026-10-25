@@ -1,12 +1,13 @@
 import { $, h, uid, clamp, debounce, pickFile, onContext } from './util.js';
 import { icon } from './icons.js';
 import { store, settings, saveSettings, bus, PAGE_W, newPage, TEMPLATES } from './store.js';
-import { renderPage, renderThumb, pageH, drawStroke } from './render.js';
+import { renderPage, renderThumb, pageH, drawStroke, FONTS, fontFamily } from './render.js';
 import { menu, popover, sheet, toast, segmented, closePopover, promptText, toggle } from './ui.js';
 import { exportPdf, exportPng, loadImageFile } from './pdf.js';
 import { suggestNames } from './suggest.js';
 import { renderLibrary, templatePicker, openSettings } from './library.js';
 import { clearSelection, renderSelection, finishText, selectIds, hasSelection, deleteSelection } from './tools.js';
+import { addPageMenu as openAddPage } from './addpage.js';
 
 // Page canvases only need to look fine while scrolling; the detail layer provides sharpness.
 // Keeping them smaller saves iPad memory and makes each re-render faster.
@@ -15,16 +16,16 @@ const MAX_CANVAS_PX = 6e6;
 // ---------- Tool configuration (per device) ----------
 const DEFAULT_TOOLS = {
   pen: {
-    pen: 'fountain', colors: ['#1A1A1A', '#1F4FD1', '#D12F2F'], color: 0, widths: [1.5, 3, 5], width: 1,
+    pen: 'fountain', colors: ['#0F2747', '#2F6DB5', '#4F7A66'], color: 0, widths: [1.5, 3, 5], width: 1,
     sharp: 0.5, press: 0.5, stab: 0, // tip sharpness, pressure sensitivity, stroke stabilisation (0..1)
     drawHold: true, scribble: true, scribbleAll: true, circleLasso: true,
   },
   highlighter: { colors: ['#FFE14D', '#7CE38B', '#FF8AD0'], color: 0, widths: [12, 20, 30], width: 1, straight: false },
-  shapes: { colors: ['#1A1A1A', '#1F4FD1', '#D12F2F'], color: 0, widths: [1.5, 3, 5], width: 1 },
+  shapes: { colors: ['#0F2747', '#2F6DB5', '#4F7A66'], color: 0, widths: [1.5, 3, 5], width: 1 },
   eraser: { sizes: [6, 14, 30], size: 1, mode: 'precise', hlOnly: false },
   lasso: { strokes: true, images: true, text: true },
-  text: { colors: ['#1A1A1A', '#1F4FD1', '#D12F2F'], color: 0, size: 24 },
-  laser: { colors: ['#FF3B30', '#34C759', '#0A84FF'], color: 0 },
+  text: { colors: ['#0F2747', '#2F6DB5', '#4F7A66'], color: 0, size: 24 },
+  laser: { colors: ['#2F6DB5', '#4F7A66', '#E8A23B'], color: 0 },
 };
 const saved = settings.tools || {};
 export const T = Object.fromEntries(Object.entries(DEFAULT_TOOLS).map(([k, v]) => [k, { ...v, ...(saved[k] || {}) }]));
@@ -32,14 +33,32 @@ T.presets = saved.presets || [];
 settings.tools = T;
 export const saveTools = debounce(saveSettings, 300);
 
-// Lasso sits in the left group (as in Goodnotes); these are the centre tools.
+// Tools, shown in the tool row in these groups (drawing · content · presentation)
+const TOOL_GROUPS = [['pen', 'highlighter', 'eraser', 'lasso', 'shapes'], ['text', 'image'], ['laser', 'screenshot']];
 const TOOLS = [
   ['pen', 'Stift', 'pen'], ['eraser', 'Radierer', 'eraser'], ['highlighter', 'Textmarker', 'highlighter'],
   ['text', 'Text', 'text'], ['shapes', 'Formen', 'shapes'], ['image', 'Bild', 'image'],
   ['laser', 'Laserpointer', 'laser'], ['screenshot', 'Screenshot', 'screenshot'],
 ];
-export const PALETTE = ['#000000', '#4A4A4A', '#8E8E93', '#FFFFFF', '#1F4FD1', '#2E8BFF', '#36B7E8', '#1F8A4C', '#5BC236', '#F2C200',
-  '#FF9500', '#D12F2F', '#FF2D55', '#AF52DE', '#8E5A2B', '#FFE14D', '#7CE38B', '#8FD3FF', '#FF8AD0', '#FFB86B'];
+// Colour palettes for the colour picker (switchable; the choice is saved per device).
+// PALETTE is the active one — updated in place so other modules (lasso recolour) see the switch.
+export const PALETTES = {
+  standard: ['Standard', ['#000000', '#4A4A4A', '#8E8E93', '#FFFFFF', '#1F4FD1', '#2E8BFF', '#36B7E8', '#1F8A4C', '#5BC236', '#F2C200',
+    '#FF9500', '#D12F2F', '#FF2D55', '#AF52DE', '#8E5A2B', '#FFE14D', '#7CE38B', '#8FD3FF', '#FF8AD0', '#FFB86B']],
+  pastel: ['Pastell', ['#F4A6A6', '#F7C59F', '#F9E2A0', '#D8EDA0', '#AEE2C3', '#9FDDD6', '#A6D8EE', '#B5C8F2', '#C5B9EF', '#E2B6EA',
+    '#F5B8D2', '#E8D5C4', '#CFC6BD', '#B8C4CC', '#FFD6D6', '#FFE6C7', '#FFF4C2', '#DDF5D0', '#D4ECFA', '#EBDDF8']],
+  folio: ['Folio', ['#0F2747', '#1F3A5F', '#3E6E9F', '#5E7F9F', '#8EB8E6', '#4F7A66', '#6B8F7E', '#9DB5A6', '#A7B4C6', '#3A3F4A',
+    '#D9D2C6', '#B8A68A', '#C9A35B', '#E3C9A0', '#7D6B91', '#B6A6C9', '#E8E3D8', '#FAF9F5', '#FFFFFF', '#000000']],
+  vivid: ['Kräftig', ['#000000', '#E60026', '#FF4D00', '#FF8C00', '#FFC400', '#B5D800', '#00B140', '#00B3A4', '#00A3E0', '#0066FF',
+    '#3D2BFF', '#7A1FFF', '#B000E6', '#FF00A8', '#FF3D7F', '#8B4513', '#5C3A21', '#808080', '#C0C0C0', '#FFFFFF']],
+  gray: ['Graustufen', ['#000000', '#1C1C1E', '#2C2C2E', '#3A3A3C', '#48484A', '#545456', '#636366', '#7C7C80', '#8E8E93', '#A1A1A6',
+    '#AEAEB2', '#BCBCC0', '#C7C7CC', '#D1D1D6', '#DCDCE0', '#E5E5EA', '#EDEDF0', '#F2F2F7', '#F9F9FB', '#FFFFFF']],
+};
+export const PALETTE = [...(PALETTES[settings.palette] || PALETTES.standard)[1]];
+function usePalette(key) {
+  settings.palette = key; saveSettings();
+  PALETTE.splice(0, PALETTE.length, ...PALETTES[key][1]);
+}
 
 // ---------- Editor state ----------
 export const ed = {
@@ -157,7 +176,12 @@ async function renderTabs() {
   updateTabLabels();
   // Tabs only appear once more than one tab is open (the web app has none).
   $('#tabbar').hidden = ed.tabs.length < 2;
-  if (ed.doc) $('#docTitleText').textContent = ed.doc.name;
+  if (ed.doc) {
+    $('#docTitleText').textContent = ed.doc.name;
+    // breadcrumb: the folder the document lives in
+    const folder = ed.doc.parent && await store.get(ed.doc.parent);
+    $('#docCrumb').textContent = folder && !folder.deleted ? folder.name : '';
+  }
 }
 // Tab titles; when a document is open in several tabs, each shows its page number.
 function updateTabLabels() {
@@ -418,19 +442,9 @@ async function changeTemplate(i = ed.cur) {
   commitPages(ed.doc.pages.map((p, j) => (scope === 'all' || j === i) ? { ...p, template: tmpl } : p));
 }
 
+// "Seite hinzufügen" window: see addpage.js
 function addPageMenu(anchor) {
-  const cur = currentPage();
-  let tmpl = cur?.bg ? (settings.lastTemplate || 'lined') : (cur?.template || 'lined');
-  const hh = cur?.bg ? 1414 : pageH(cur);
-  const make = at => { closePopover(); insertPages([newPage(tmpl, hh, cur?.bg ? undefined : cur?.paper)], at); };
-  const p = popover(anchor, h('div', { class: 'addpage' },
-    h('div', { class: 'pop-title' }, 'Seite hinzufügen'),
-    templatePicker(tmpl, v => { tmpl = v; }, hh),
-    h('div', { class: 'addpage-btns' },
-      h('button', { class: 'pill', onclick: () => make(ed.cur) }, 'Davor'),
-      h('button', { class: 'pill primary', onclick: () => make(ed.cur + 1) }, 'Danach'),
-      h('button', { class: 'pill', onclick: () => make(ed.doc.pages.length) }, 'Am Ende'))), { className: 'wide' });
-  return p;
+  return openAddPage(anchor, { doc: ed.doc, cur: ed.cur, insert: (pages, at) => insertPages(pages, at) });
 }
 
 export async function insertImage() {
@@ -537,10 +551,10 @@ export function toggleSearch(open = searchEl.hidden) {
 }
 
 // ---------- Toolbar ----------
-function tb(id, ic, title, onclick, size = 24) { return h('button', { class: 'barbtn', id, title, 'aria-label': title, onclick }, icon(ic, size)); }
+function tb(id, ic, title, onclick, size = 20) { return h('button', { class: 'barbtn', id, title, 'aria-label': title, onclick }, icon(ic, size)); }
 const toolBtn = ([id, label, ic]) => h('button', {
   class: 'toolbtn', 'data-tool': id, title: label, 'aria-label': label, onclick: () => selectTool(id),
-}, h('span', {}, icon(ic, 24)));
+}, h('span', {}, icon(ic, 22)));
 
 function exportMenu(anchor) {
   menu(anchor, [
@@ -554,7 +568,7 @@ function exportMenu(anchor) {
 
 function buildToolbar() {
   $('#tbLeft').append(
-    tb('btnHome', 'home', 'Bibliothek', showLibrary),
+    tb('btnHome', 'chevronLeft', 'Bibliothek', showLibrary, 22),
     h('button', {
       class: 'doc-title', id: 'docTitle', title: 'Dokument',
       onclick: e => menu(e.currentTarget, [
@@ -565,12 +579,13 @@ function buildToolbar() {
         '-',
         { label: 'Zur Bibliothek', icon: 'library', action: showLibrary },
       ]),
-    }, h('span', { id: 'docTitleText' }), icon('chevronDown', 16)),
+    }, h('span', { id: 'docCrumb', class: 'crumb' }), h('span', { id: 'docTitleText' }), icon('chevronDown', 14)),
     tb('btnThumbs', 'sidebar', 'Seitenübersicht', () => { settings.thumbsOpen = !settings.thumbsOpen; saveSettings(); renderThumbs(); setTimeout(() => { applyZoom(); rerenderVisible(); }, 0); }),
     tb('btnSearch', 'search', 'Suchen', () => toggleSearch()),
-    tb('btnBookmark', 'bookmark', 'Lesezeichen', () => toggleBookmark()),
-    toolBtn(['lasso', 'Lasso', 'lasso']));
-  $('#tbTools').append(...TOOLS.map(toolBtn));
+    tb('btnBookmark', 'bookmark', 'Lesezeichen', () => toggleBookmark()));
+  // Folio tool row: drawing · content · presentation
+  const byTool = Object.fromEntries([...TOOLS, ['lasso', 'Lasso', 'lasso']].map(t => [t[0], t]));
+  $('#tbTools').append(...TOOL_GROUPS.flatMap((g, i) => [i ? h('div', { class: 'tool-sep' }) : null, ...g.map(id => toolBtn(byTool[id]))]).filter(Boolean));
   $('#undoPill').append(
     h('button', { id: 'btnUndo', title: 'Rückgängig (Strg+Z)', 'aria-label': 'Rückgängig', onclick: undo }, icon('undo')),
     h('button', { id: 'btnRedo', title: 'Wiederholen (Strg+Y)', 'aria-label': 'Wiederholen', onclick: redo }, icon('redo')));
@@ -629,6 +644,9 @@ export function updateChrome() {
 const optbar = $('#optbar');
 const sep = () => h('div', { class: 'opt-sep' });
 
+// Direct-choice colours: 1–10 slots per tool. Tap = choose, tap the active one = edit;
+// "+" adds a slot (copy of the active colour).
+const MAX_SLOTS = 10;
 function colorSlots(cfg) {
   return h('div', { class: 'opt-group' }, cfg.colors.map((c, i) => h('button', {
     class: 'swatch' + (cfg.color === i ? ' active' : ''), style: { '--c': c }, title: cfg.color === i ? 'Farbe ändern' : 'Farbe wählen',
@@ -636,18 +654,49 @@ function colorSlots(cfg) {
       if (cfg.color === i) return colorPopover(e.currentTarget, cfg, i);
       cfg.color = i; saveTools(); renderOptions(); recolorSelection(c);
     },
-  })));
+  })), cfg.colors.length < MAX_SLOTS ? h('button', {
+    class: 'swatch-add', title: 'Farbe zur Direktauswahl hinzufügen', 'aria-label': 'Farbe hinzufügen',
+    onclick: () => { cfg.colors.push(cfg.colors[cfg.color] || '#0F2747'); cfg.color = cfg.colors.length - 1; saveTools(); renderOptions(); colorPopover(optbar.querySelector('.swatch.active'), cfg, cfg.color); },
+  }, icon('plus', 16)) : null);
 }
 
+// Colour window: palette (switchable), own saved colours, any colour + hex, remove slot
 function colorPopover(anchor, cfg, i) {
-  const set = (c, close) => { cfg.colors[i] = c; cfg.color = i; saveTools(); renderOptions(); recolorSelection(c); if (close) closePopover(); };
-  const hex = h('input', { class: 'field mono', value: cfg.colors[i].toUpperCase(), maxlength: 7 });
-  hex.onchange = () => { if (/^#[0-9a-f]{6}$/i.test(hex.value)) set(hex.value); };
-  const picker = h('input', { type: 'color', class: 'colorwell', value: cfg.colors[i], oninput: e => { hex.value = e.target.value.toUpperCase(); set(e.target.value); } });
-  popover(anchor, h('div', { class: 'colorpop' },
-    h('div', { class: 'pop-title' }, 'Farbe'),
-    h('div', { class: 'palette' }, PALETTE.map(c => h('button', { class: 'pal' + (c.toLowerCase() === cfg.colors[i].toLowerCase() ? ' active' : ''), style: { '--c': c }, onclick: () => set(c, true) }))),
-    h('div', { class: 'custom-color' }, picker, hex)));
+  const own = () => (settings.customColors ||= []);
+  const set = (c, close) => { cfg.colors[i] = c; cfg.color = i; saveTools(); renderOptions(); recolorSelection(c); if (close) closePopover(); else draw(); };
+  const body = h('div', { class: 'colorpop' });
+  const draw = () => {
+    const cur = (cfg.colors[i] || '#000000').toLowerCase();
+    const sw = c => h('button', { class: 'pal' + (c.toLowerCase() === cur ? ' active' : ''), style: { '--c': c }, title: c.toUpperCase(), onclick: () => set(c, true) });
+    const hex = h('input', { class: 'field mono', value: cur.toUpperCase(), maxlength: 7, 'aria-label': 'Hex-Farbwert' });
+    hex.onchange = () => { if (/^#[0-9a-f]{6}$/i.test(hex.value)) set(hex.value); };
+    const picker = h('input', { type: 'color', class: 'colorwell', value: cur, onchange: e => set(e.target.value), oninput: e => { hex.value = e.target.value.toUpperCase(); } });
+    const ownSw = c => {
+      const b = sw(c);
+      b.title = c.toUpperCase() + ' — gedrückt halten oder Rechtsklick zum Entfernen';
+      onContext(b, () => { settings.customColors = own().filter(x => x !== c); saveSettings(); draw(); });
+      return b;
+    };
+    body.replaceChildren(
+      h('div', { class: 'pal-tabs' }, Object.entries(PALETTES).map(([k, [label]]) => h('button', {
+        class: 'chip' + ((settings.palette || 'standard') === k ? ' on' : ''), onclick: () => { usePalette(k); draw(); },
+      }, label))),
+      h('div', { class: 'palette' }, PALETTE.map(sw)),
+      h('div', { class: 'pop-title' }, 'Eigene Farben'),
+      h('div', { class: 'palette own' }, own().map(ownSw), h('button', {
+        class: 'pal pal-add', title: 'Aktuelle Farbe speichern', 'aria-label': 'Aktuelle Farbe speichern',
+        onclick: () => { if (!own().includes(cur)) { own().push(cur); saveSettings(); } draw(); },
+      }, icon('plus', 16))),
+      h('div', { class: 'custom-color' }, picker, hex),
+      cfg.colors.length > 1 ? h('button', {
+        class: 'menu-item danger pal-remove', onclick: () => {
+          cfg.colors.splice(i, 1); cfg.color = Math.min(cfg.color, cfg.colors.length - 1);
+          saveTools(); renderOptions(); closePopover();
+        },
+      }, h('span', { class: 'menu-label' }, 'Aus Direktauswahl entfernen'), h('span', { class: 'menu-icon' }, icon('trash', 18))) : null);
+  };
+  draw();
+  popover(anchor, body);
 }
 
 function widthSlots(cfg, max, scale) {
@@ -834,11 +883,22 @@ export function renderOptions() {
       chip('Text', cfg.text, () => { cfg.text = !cfg.text; saveTools(); renderOptions(); }),
       hasSelection() ? [sep(), h('button', { class: 'chip danger', onclick: deleteSelection }, 'Auswahl löschen')] : null];
   } else if (t === 'text') {
+    // values of the box being edited (or the first selected one), else the tool's defaults
+    const selText = ed.sel && ed.sel.page.elements.find(e => ed.sel.ids.has(e.id) && e.type === 'text');
+    const cur = ed.editing ? ed.editing.current() : selText || cfg;
+    const size = Math.round(cur.size);
     parts = [colorSlots(cfg), sep(), h('div', { class: 'stepper' },
-      h('button', { class: 'iconbtn', title: 'Kleiner', onclick: () => { cfg.size = Math.max(10, cfg.size - 2); saveTools(); renderOptions(); resizeSelectionText(cfg.size); } }, icon('minus', 18)),
-      h('span', { class: 'mono' }, cfg.size + ' pt'),
-      h('button', { class: 'iconbtn', title: 'Größer', onclick: () => { cfg.size = Math.min(96, cfg.size + 2); saveTools(); renderOptions(); resizeSelectionText(cfg.size); } }, icon('plus', 18))),
-    sep(), h('span', { class: 'opt-hint' }, 'Auf die Seite tippen, um ein Textfeld zu erstellen')];
+      h('button', { class: 'iconbtn', title: 'Kleiner', onclick: () => applyTextStyle({ size: Math.max(8, size - 2) }) }, icon('minus', 18)),
+      h('span', { class: 'mono' }, size + ' pt'),
+      h('button', { class: 'iconbtn', title: 'Größer', onclick: () => applyTextStyle({ size: Math.min(160, size + 2) }) }, icon('plus', 18))),
+      sep(),
+      h('button', { class: 'iconbtn txt-style' + (cur.bold ? ' on' : ''), title: 'Fett', 'aria-pressed': !!cur.bold, onclick: () => applyTextStyle({ bold: !cur.bold }) }, h('b', {}, 'B')),
+      h('button', { class: 'iconbtn txt-style' + (cur.italic ? ' on' : ''), title: 'Kursiv', 'aria-pressed': !!cur.italic, onclick: () => applyTextStyle({ italic: !cur.italic }) }, h('i', {}, 'I')),
+      h('button', {
+        class: 'opt-drop', title: 'Schriftart', style: { fontFamily: fontFamily(cur) },
+        onclick: e => { const p = menu(e.currentTarget, Object.entries(FONTS).map(([k, [label]]) => ({ label, checked: (cur.font || 'sans') === k, action: () => applyTextStyle({ font: k }) }))); keepTextFocus(p.el); },
+      }, h('span', {}, (FONTS[cur.font] || FONTS.sans)[0]), icon('chevronDown', 14)),
+      ed.editing || selText ? null : [sep(), h('span', { class: 'opt-hint' }, 'Auf die Seite tippen, um ein Textfeld zu erstellen')]];
   } else if (t === 'laser') {
     parts = [colorSlots(cfg), sep(), h('span', { class: 'opt-hint' }, 'Die Spur verschwindet automatisch')];
   } else if (t === 'screenshot') {
@@ -854,6 +914,25 @@ function recolorSelection(c) {
   const page = ed.sel.page;
   commit(page, page.elements.map(e => ed.sel.ids.has(e.id) && e.type !== 'image' ? { ...e, color: c } : e));
 }
+// Size / bold / italic / font: for the box being edited, the selected text boxes, and new boxes.
+function applyTextStyle(patch) {
+  const cfg = T.text;
+  // while editing, the style goes to the selected characters only; otherwise it also becomes
+  // the default for new text boxes
+  if (!ed.editing) { for (const [k, v] of Object.entries(patch)) cfg[k] = v; saveTools(); }
+  if (ed.editing) ed.editing.setStyle(patch);
+  else if (ed.sel) {
+    const page = ed.sel.page;
+    commit(page, page.elements.map(e => ed.sel.ids.has(e.id) && e.type === 'text' ? { ...e, ...patch } : e));
+    renderSelection();
+  }
+  renderOptions();
+}
+// Clicks in the bar or its menus must not take the focus from the text being edited.
+function keepTextFocus(el) {
+  for (const t of ['pointerdown', 'mousedown']) el.addEventListener(t, e => { if (ed.editing && !e.target.closest('input')) e.preventDefault(); });
+}
+keepTextFocus(optbar);
 function resizeSelectionText(size) {
   if (ed.editing) { ed.editing.setSize(size); return; }
   if (!ed.sel) return;

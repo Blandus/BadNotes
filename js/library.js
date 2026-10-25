@@ -1,5 +1,5 @@
 import { $, h, fmtDate, pickFile } from './util.js';
-import { icon } from './icons.js';
+import { icon, folioMark } from './icons.js';
 import { store, settings, saveSettings, bus, newNotebook, newFolder, cloneNotebook, newPage, COVERS, TEMPLATES, TEMPLATE_SECTIONS, PAPERS, FORMATS, PAGE_W, APP_VERSION } from './store.js';
 import { renderCover, renderThumb } from './render.js';
 import { menu, sheet, promptText, confirmBox, toast, segmented, toggle } from './ui.js';
@@ -7,9 +7,10 @@ import { pdfToPages, loadImageFile, exportPdf } from './pdf.js';
 import { openDoc } from './editor.js';
 import { suggestNames } from './suggest.js';
 import { sync } from './sync.js';
+import { newTextDoc, openTextDoc, renderTextThumb, plainText, printDoc } from './textdoc.js';
 
 const SECTIONS = {
-  docs: { label: 'Dokumente', icon: 'folder' },
+  docs: { label: 'Alle Notizen', icon: 'notes' },
   favorites: { label: 'Favoriten', icon: 'favorites' },
   recent: { label: 'Zuletzt geöffnet', icon: 'clock' },
   trash: { label: 'Papierkorb', icon: 'trash' },
@@ -19,7 +20,7 @@ const SORTS = [['date', 'Datum', 'Änderungsdatum'], ['created', 'Erstellt', 'Er
 const lib = {
   section: settings.section || 'docs', folder: null,
   view: settings.view || 'grid', sort: settings.sort || 'date',
-  query: '', selecting: false, selected: new Set(),
+  query: '', selecting: false, selected: new Set(), filter: settings.filter || 'all',
 };
 let records = [];
 const root = $('#library');
@@ -32,7 +33,9 @@ function folderPath(id) {
   return out;
 }
 const descendants = id => live().filter(r => r.parent === id).flatMap(r => [r, ...(r.kind === 'folder' ? descendants(r.id) : [])]);
-const containsText = (r, q) => r.kind === 'notebook' && r.pages.some(p => (p.pdfText || '').toLowerCase().includes(q) || p.elements.some(e => e.type === 'text' && e.text.toLowerCase().includes(q)));
+const containsText = (r, q) => r.kind === 'textdoc' ? plainText(r).toLowerCase().includes(q) : r.kind === 'notebook' && r.pages.some(p => (p.pdfText || '').toLowerCase().includes(q) || p.elements.some(e => e.type === 'text' && e.text.toLowerCase().includes(q)));
+
+const kindOk = r => lib.filter === 'all' || r.kind === lib.filter; // filter tabs
 
 function items() {
   const all = live();
@@ -41,7 +44,7 @@ function items() {
     const q = lib.query.toLowerCase();
     list = all.filter(r => !r.trashed && (r.name.toLowerCase().includes(q) || containsText(r, q)));
   } else if (lib.section === 'recent') {
-    return all.filter(r => !r.trashed && r.kind === 'notebook').sort((a, b) => (b.opened || b.updated) - (a.opened || a.updated)).slice(0, 30);
+    return all.filter(r => !r.trashed && r.kind !== 'folder' && kindOk(r)).sort((a, b) => (b.opened || b.updated) - (a.opened || a.updated)).slice(0, 30);
   } else if (lib.section === 'favorites') list = all.filter(r => !r.trashed && r.favorite);
   else if (lib.section === 'trash') list = all.filter(r => r.trashed && !r.trashedBy);
   else list = all.filter(r => !r.trashed && (r.parent || null) === lib.folder);
@@ -50,7 +53,7 @@ function items() {
     created: (a, b) => (b.created || 0) - (a.created || 0),
     name: (a, b) => a.name.localeCompare(b.name, 'de', { numeric: true }),
   }[lib.sort];
-  return list.sort((a, b) => (a.kind === b.kind ? cmp(a, b) : a.kind === 'folder' ? -1 : 1));
+  return list.filter(kindOk).sort((a, b) => (a.kind === b.kind ? cmp(a, b) : a.kind === 'folder' ? -1 : 1));
 }
 
 export async function renderLibrary() {
@@ -72,56 +75,58 @@ function go(section, folder = null) {
 }
 
 // ---------- Sidebar ----------
+// Folder dots cycle through the brand's quiet colours
+const FOLDER_DOTS = ['#6B8F7E', '#D9D2C6', '#8EB8E6', '#A7B4C6', '#B9C9A8'];
 function renderSidebar() {
   const sb = $('#sidebar');
   const folders = live().filter(r => r.kind === 'folder' && !r.trashed && !r.parent).sort((a, b) => a.name.localeCompare(b.name, 'de'));
   const item = (key, s) => h('button', {
     class: 'sb-item' + (lib.section === key && !lib.folder && !lib.query ? ' active' : ''),
-    'data-drop': key === 'docs' ? '' : null, // dropping on "Dokumente" moves to the top level
+    'data-drop': key === 'docs' ? '' : null, // dropping on "Alle Notizen" moves to the top level
     onclick: () => go(key),
-  }, icon(s.icon, 24), h('span', {}, s.label));
+  }, icon(s.icon, 20), h('span', {}, s.label));
   sb.replaceChildren(
-    h('div', { class: 'sb-head' }, h('img', { src: 'logo.png', alt: '', width: 32, height: 32 }), h('span', {}, 'BadNotes')),
+    h('div', { class: 'sb-head' }, folioMark(30), h('span', {}, 'Folio')),
     h('nav', { class: 'sb-nav' },
       item('docs', SECTIONS.docs),
-      ...folders.map(f => h('button', {
+      item('recent', SECTIONS.recent),
+      item('favorites', SECTIONS.favorites),
+      item('trash', SECTIONS.trash),
+      folders.length ? h('div', { class: 'sb-label' }, 'Ordner') : null,
+      ...folders.map((f, i) => h('button', {
         class: 'sb-item sub' + (lib.folder && folderPath(lib.folder)[0]?.id === f.id ? ' active' : ''),
         'data-drop': f.id,
         onclick: () => go('docs', f.id),
-      }, icon('folder', 20), h('span', {}, f.name))),
-      item('favorites', SECTIONS.favorites),
-      item('recent', SECTIONS.recent),
-      h('div', { class: 'sb-sep' }),
-      item('trash', SECTIONS.trash)),
+      }, h('i', { class: 'sb-dot', style: { background: FOLDER_DOTS[i % FOLDER_DOTS.length] } }), h('span', {}, f.name)))),
     h('div', { class: 'sb-foot' },
       h('button', { id: 'sbSync', class: 'sb-sync', title: 'Jetzt synchronisieren', onclick: () => sync(true) },
-        icon('sync', 16), h('span', {}, settings.syncStatus || (settings.clientId ? 'Synchronisieren' : 'Sync nicht eingerichtet')))));
+        icon('sync', 16), h('span', {}, settings.syncStatus || (settings.clientId ? 'Synchronisieren' : 'Sync nicht eingerichtet'))),
+      h('button', { class: 'sb-gear', title: 'Einstellungen', 'aria-label': 'Einstellungen', onclick: openSettings }, icon('gear', 18))));
 }
 
 // ---------- Header ----------
+const FILTERS = [['all', 'Alle'], ['notebook', 'Notizbücher'], ['textdoc', 'Textdokumente'], ['folder', 'Ordner']];
 function renderHeader() {
   const head = $('#libHead');
   const path = lib.folder ? folderPath(lib.folder) : [];
   const title = lib.query ? 'Suche' : path.length ? path[path.length - 1].name : SECTIONS[lib.section].label;
 
-  // Top row: search and settings, right-aligned (as in Goodnotes)
   const search = h('input', {
-    class: 'searchfield', type: 'search', placeholder: 'Suchen', value: lib.query,
+    class: 'searchfield', type: 'search', placeholder: 'Notizen durchsuchen…', value: lib.query, 'aria-label': 'Suchen',
     oninput: e => { lib.query = e.target.value; renderContent(); renderHeaderTitle(); },
-    onkeydown: e => { if (e.key === 'Escape') { lib.query = ''; lib.searchOpen = false; renderHeader(); renderContent(); } },
+    onkeydown: e => { if (e.key === 'Escape') { lib.query = ''; e.target.value = ''; e.target.blur(); renderContent(); renderHeaderTitle(); } },
   });
-  const top = h('div', { class: 'lib-top' },
+  const titlebar = h('div', { class: 'lib-titlebar' },
     h('button', {
-      class: 'iconbtn plain', title: 'Seitenleiste',
+      class: 'iconbtn plain', title: 'Seitenleiste', 'aria-label': 'Seitenleiste',
       onclick: () => { settings.sidebarHidden = !settings.sidebarHidden; saveSettings(); root.classList.toggle('sidebar-hidden', settings.sidebarHidden); },
-    }, icon('sidebar', 22)),
-    h('div', { class: 'spacer' }),
-    lib.searchOpen || lib.query ? search : null,
-    h('button', {
-      class: 'iconbtn plain', title: 'Suchen',
-      onclick: () => { lib.searchOpen = !(lib.searchOpen || lib.query); if (!lib.searchOpen) lib.query = ''; renderHeader(); renderContent(); if (lib.searchOpen) $('#libHead .searchfield').focus(); },
-    }, icon('search', 22)),
-    h('button', { class: 'iconbtn plain', title: 'Einstellungen', onclick: openSettings }, icon('gear', 22)));
+    }, icon('sidebar', 20)),
+    h('div', { class: 'lib-title' },
+      path.length && !lib.query ? h('button', { class: 'backbtn', title: 'Zurück', 'data-drop': path[path.length - 2]?.id || '', onclick: () => go('docs', path[path.length - 2]?.id || null) }, icon('chevronLeft', 24)) : null,
+      h('h1', { id: 'libTitle' }, title)),
+    search,
+    lib.section === 'docs' && !lib.query
+      ? h('button', { class: 'fab', title: 'Neu', 'aria-label': 'Neu', onclick: e => newMenu(e.currentTarget) }, icon('plus', 22)) : null);
 
   let right;
   if (lib.selecting) {
@@ -131,38 +136,34 @@ function renderHeader() {
       lib.section === 'trash'
         ? [h('button', { class: 'pill-btn', disabled: !n, onclick: () => restore(ids) }, 'Wiederherstellen'),
           h('button', { class: 'pill-btn danger', disabled: !n, onclick: () => purge(ids) }, 'Löschen')]
-        : [h('button', { class: 'pill-btn', disabled: !n, onclick: () => moveItems(ids) }, icon('move', 18), 'Verschieben'),
-          h('button', { class: 'pill-btn', disabled: !n, onclick: () => duplicate(ids) }, icon('copy', 18), 'Duplizieren'),
-          h('button', { class: 'pill-btn danger', disabled: !n, onclick: () => trash(ids) }, icon('trash', 18), 'Löschen')],
+        : [h('button', { class: 'pill-btn', disabled: !n, onclick: () => moveItems(ids) }, icon('move', 16), 'Verschieben'),
+          h('button', { class: 'pill-btn', disabled: !n, onclick: () => duplicate(ids) }, icon('copy', 16), 'Duplizieren'),
+          h('button', { class: 'pill-btn danger', disabled: !n, onclick: () => trash(ids) }, icon('trash', 16), 'Löschen')],
       h('button', { class: 'pill-btn primary', onclick: () => { lib.selecting = false; lib.selected.clear(); renderHeader(); renderContent(); } }, 'Fertig'),
     ];
   } else {
     const sort = SORTS.find(s => s[0] === lib.sort) || SORTS[0];
+    const setView = v => { lib.view = v; settings.view = v; saveSettings(); renderHeader(); renderContent(); };
     right = [
-      lib.section === 'docs' && !lib.query
-        ? h('button', { class: 'new-btn', onclick: e => newMenu(e.currentTarget) }, icon('plus', 20), h('span', {}, 'Neu'), icon('chevronDown', 16)) : null,
       lib.section === 'trash' && live().some(r => r.trashed)
         ? h('button', { class: 'pill-btn danger', onclick: () => purge(live().filter(r => r.trashed && !r.trashedBy).map(r => r.id)) }, 'Papierkorb leeren') : null,
-      h('span', { class: 'head-sep' }),
       lib.section === 'recent' ? null : h('button', {
         class: 'pill-btn', title: 'Sortieren',
         onclick: e => menu(e.currentTarget, SORTS.map(([k, , l]) => ({
           label: l, checked: lib.sort === k, action: () => { lib.sort = k; settings.sort = k; saveSettings(); renderHeader(); renderContent(); },
         }))),
-      }, h('span', {}, sort[1]), icon('chevronDown', 16)),
-      h('button', {
-        class: 'iconbtn plain', title: lib.view === 'grid' ? 'Listenansicht' : 'Rasteransicht',
-        onclick: () => { lib.view = lib.view === 'grid' ? 'list' : 'grid'; settings.view = lib.view; saveSettings(); renderHeader(); renderContent(); },
-      }, icon(lib.view === 'grid' ? 'list' : 'grid', 22)),
-      h('button', { class: 'iconbtn plain', title: 'Auswählen', onclick: () => { lib.selecting = true; renderHeader(); renderContent(); } }, icon('selectCircle', 22)),
+      }, icon('sort', 16), h('span', {}, sort[1])),
+      h('div', { class: 'seg-icons' },
+        h('button', { class: lib.view === 'grid' ? 'on' : '', title: 'Rasteransicht', 'aria-label': 'Rasteransicht', onclick: () => setView('grid') }, icon('grid', 18)),
+        h('button', { class: lib.view === 'list' ? 'on' : '', title: 'Listenansicht', 'aria-label': 'Listenansicht', onclick: () => setView('list') }, icon('list', 18))),
+      h('button', { class: 'iconbtn plain', title: 'Auswählen', 'aria-label': 'Auswählen', onclick: () => { lib.selecting = true; renderHeader(); renderContent(); } }, icon('selectCircle', 20)),
     ];
   }
-  head.replaceChildren(top,
-    h('div', { class: 'lib-titlebar' },
-      h('div', { class: 'lib-title' },
-        path.length && !lib.query ? h('button', { class: 'backbtn', title: 'Zurück', 'data-drop': path[path.length - 2]?.id || '', onclick: () => go('docs', path[path.length - 2]?.id || null) }, icon('chevronLeft', 26)) : null,
-        h('h1', { id: 'libTitle' }, title)),
-      h('div', { class: 'lib-actions' }, ...right.flat())));
+  const tabs = h('div', { class: 'filter-tabs', role: 'tablist' }, FILTERS.map(([k, label]) => h('button', {
+    class: 'filter-tab' + (lib.filter === k ? ' on' : ''), role: 'tab', 'aria-selected': lib.filter === k ? 'true' : 'false',
+    onclick: () => { lib.filter = k; settings.filter = k; saveSettings(); renderHeader(); renderContent(); },
+  }, label)));
+  head.replaceChildren(titlebar, h('div', { class: 'lib-toolbar' }, tabs, h('div', { class: 'spacer' }), h('div', { class: 'lib-actions' }, ...right.flat())));
 }
 function renderHeaderTitle() { $('#libTitle').textContent = lib.query ? 'Suche' : (lib.folder ? byId(lib.folder).name : SECTIONS[lib.section].label); }
 
@@ -173,6 +174,7 @@ function thumbFor(r, width) {
     return h('div', { class: 'folder-art' }, h('div', { class: 'folder-tab' }), h('div', { class: 'folder-body' }, h('span', {}, count || '')));
   }
   const c = h('canvas', { class: r.cover ? 'cover' : 'paper' });
+  if (r.kind === 'textdoc') { renderTextThumb(c, r, width * 2); return c; }
   if (r.cover) renderCover(c, r.cover, width * 2);
   else if (r.pages[0]) renderThumb(c, r.pages[0], width * 2);
   return c;
@@ -190,7 +192,7 @@ function renderContent() {
   const wrap = h('div', { class: lib.view === 'grid' ? 'lib-grid' : 'lib-list' });
   for (const r of list) wrap.append(lib.view === 'grid' ? tile(r) : row(r));
   const empty = !list.length && h('div', { class: 'empty' },
-    lib.query ? 'Keine Treffer.' : lib.section === 'trash' ? 'Der Papierkorb ist leer.' : lib.section === 'favorites' ? 'Noch keine Favoriten. Markiere Dokumente über das ⌄-Menü.' : lib.section === 'recent' ? 'Noch keine Dokumente geöffnet.' : 'Hier ist noch nichts. Tippe oben auf „Neu“.');
+    lib.query ? 'Keine Treffer.' : lib.section === 'trash' ? 'Der Papierkorb ist leer.' : lib.section === 'favorites' ? 'Noch keine Favoriten. Markiere Dokumente über das ···-Menü.' : lib.section === 'recent' ? 'Noch keine Dokumente geöffnet.' : 'Hier ist noch nichts. Tippe oben auf +.');
   content.replaceChildren(list.length ? wrap : '', empty || '');
 }
 
@@ -202,17 +204,22 @@ function activate(r) {
   }
   if (r.trashed) return itemMenu(r, null);
   if (r.kind === 'folder') go('docs', r.id);
+  else if (r.kind === 'textdoc') openTextDoc(r.id);
   else openDoc(r.id);
 }
 
+// Card: preview on a quiet stone panel, then title, date and the options button
 function tile(r) {
-  const chev = h('button', { class: 'chev', title: 'Optionen', onclick: e => { e.stopPropagation(); itemMenu(r, e.currentTarget); } }, icon('chevronDown', 16));
+  const more = h('button', { class: 'chev', title: 'Optionen', 'aria-label': 'Optionen', onclick: e => { e.stopPropagation(); itemMenu(r, e.currentTarget); } }, icon('dots', 18));
   const t = h('div', { class: 'tile' + (lib.selected.has(r.id) ? ' selected' : '') + (r.kind === 'folder' ? ' is-folder' : '') },
-    h('button', { class: 'thumb', onclick: () => activate(r) }, thumbFor(r, 125),
+    h('button', { class: 'thumb', onclick: () => activate(r), 'aria-label': r.name }, thumbFor(r, 125),
       lib.selecting ? h('span', { class: 'checkmark' }, lib.selected.has(r.id) ? icon('check', 16) : '') : null,
       r.favorite ? h('span', { class: 'fav-badge' }, icon('starFill', 14)) : null),
-    h('div', { class: 'tile-title' }, h('span', { title: r.name }, r.name), lib.selecting ? null : chev),
-    h('div', { class: 'tile-sub' }, sub(r)));
+    h('div', { class: 'tile-meta' },
+      h('div', { class: 'tile-text' },
+        h('div', { class: 'tile-title' }, h('span', { title: r.name }, r.name)),
+        h('div', { class: 'tile-sub' }, sub(r))),
+      lib.selecting ? null : more));
   if (r.kind === 'folder' && !r.trashed) t.dataset.drop = r.id;
   dragToFolder(t, r);
   return t;
@@ -224,9 +231,9 @@ function row(r) {
       h('div', { class: 'row-thumb' }, thumbFor(r, 40)),
       h('div', { class: 'row-main' },
         h('div', { class: 'row-title' }, r.name, r.favorite ? icon('starFill', 12) : ''),
-        h('div', { class: 'row-sub' }, sub(r) + (r.kind === 'notebook' ? ` · ${r.pages.length} ${r.pages.length === 1 ? 'Seite' : 'Seiten'}` : ''))),
+        h('div', { class: 'row-sub' }, sub(r) + (r.kind === 'notebook' ? ` · ${r.pages.length} ${r.pages.length === 1 ? 'Seite' : 'Seiten'}` : r.kind === 'textdoc' ? ' · Textdokument' : ''))),
       lib.selecting ? h('span', { class: 'checkmark' }, lib.selected.has(r.id) ? icon('check', 16) : '') : null),
-    lib.selecting ? null : h('button', { class: 'chev', title: 'Optionen', onclick: e => itemMenu(r, e.currentTarget) }, icon('chevronDown', 16)));
+    lib.selecting ? null : h('button', { class: 'chev', title: 'Optionen', 'aria-label': 'Optionen', onclick: e => itemMenu(r, e.currentTarget) }, icon('dots', 18)));
   if (r.kind === 'folder' && !r.trashed) el.dataset.drop = r.id;
   dragToFolder(el, r);
   return el;
@@ -329,6 +336,7 @@ function newMenu(anchor) {
   menu(anchor, [
     { label: 'Notizbuch', icon: 'doc', action: newNotebookSheet },
     { label: 'Schnellnotiz', icon: 'quick', action: quickNote },
+    { label: 'Textdokument', icon: 'text', action: newTextDocument },
     { label: 'Ordner', icon: 'folder', action: createFolder },
     '-',
     { label: 'PDF importieren', icon: 'pdf', action: importPdf },
@@ -346,16 +354,17 @@ function itemMenu(r, anchor) {
       { label: 'Endgültig löschen', icon: 'trash', danger: true, action: () => purge([r.id]) },
     ]);
   }
-  const nb = r.kind === 'notebook';
+  const nb = r.kind === 'notebook', text = r.kind === 'textdoc', doc = nb || text;
   menu(at, [
-    nb && { label: 'Öffnen', icon: 'doc', action: () => openDoc(r.id) },
+    doc && { label: 'Öffnen', icon: 'doc', action: () => activate(r) },
     { label: 'Umbenennen', icon: 'rename', action: () => rename(r) },
-    nb && { label: 'Duplizieren', icon: 'copy', action: () => duplicate([r.id]) },
+    doc && { label: 'Duplizieren', icon: 'copy', action: () => duplicate([r.id]) },
     { label: 'Verschieben', icon: 'move', action: () => moveItems([r.id]) },
     { label: r.favorite ? 'Aus Favoriten entfernen' : 'Zu Favoriten', icon: r.favorite ? 'starFill' : 'star', action: () => update(r, { favorite: !r.favorite }) },
     nb && { label: 'Cover ändern', icon: 'palette', action: () => changeCover(r) },
     nb && { label: 'Als PDF exportieren', icon: 'share', action: () => exportPdf(r) },
-    nb && { label: 'Als Goodnotes-Datei (Beta)', icon: 'doc', action: async () => (await import('./goodnotes-export.js')).exportGoodnotes(r) },
+    text && { label: 'Als PDF (Drucken)', icon: 'share', action: () => printDoc(r) },
+    doc && { label: 'Als Goodnotes-Datei (Beta)', icon: 'doc', action: async () => (await import('./goodnotes-export.js')).exportGoodnotes(r) },
     '-',
     { label: 'In Papierkorb', icon: 'trash', danger: true, action: () => trash([r.id]) },
   ]);
@@ -366,11 +375,17 @@ async function update(r, patch) { Object.assign(r, patch, { updated: Date.now() 
 
 async function rename(r) {
   const name = await promptText('Umbenennen', r.name, '', r.kind === 'notebook' ? suggestNames(r) : []);
-  if (name) update(r, { name });
+  if (!name) return;
+  // a text document's name is its title block
+  const title = r.kind === 'textdoc' && r.blocks.find(b => b.type === 'title');
+  if (title) title.children = [{ text: name }];
+  update(r, { name });
 }
 
 async function duplicate(ids) {
-  const copies = ids.map(byId).filter(r => r?.kind === 'notebook').map(r => cloneNotebook(r, r.name + ' Kopie'));
+  const copies = ids.map(byId).filter(r => r?.kind === 'notebook' || r?.kind === 'textdoc').map(r => r.kind === 'textdoc'
+    ? { ...structuredClone(r), id: newTextDoc().id, name: r.name + ' Kopie', created: Date.now(), updated: Date.now(), opened: Date.now(), favorite: false }
+    : cloneNotebook(r, r.name + ' Kopie'));
   if (!copies.length) return toast('Ordner können nicht dupliziert werden');
   await store.putMany(copies);
   lib.selecting = false; lib.selected.clear();
@@ -472,7 +487,7 @@ export { templatePicker };
 
 // Two-column "new notebook" window modelled on Goodnotes: title and previews of
 // cover and paper on the left, a gallery for whichever of the two is selected on the right.
-const COVER_NAMES = ['Marine', 'Blau', 'Petrol', 'Grün', 'Senf', 'Orange', 'Rot', 'Beere', 'Violett', 'Graphit', 'Grau', 'Sand'];
+const COVER_NAMES = ['Ink Navy', 'Tiefblau', 'Mist Blue', 'Sage Green', 'Tannengrün', 'Schiefer', 'Warm Stone', 'Sand', 'Ocker', 'Pflaume', 'Graphit', 'Soft Ivory'];
 const coverName = c => c ? COVER_NAMES[COVERS.indexOf(c)] || 'Eigene Farbe' : 'Kein Umschlag';
 
 function newNotebookSheet() {
@@ -591,6 +606,12 @@ async function quickNote() {
   openDoc(nb.id);
 }
 
+async function newTextDocument() {
+  const doc = newTextDoc({ parent: lib.section === 'docs' ? lib.folder : null });
+  await store.put(doc);
+  openTextDoc(doc.id);
+}
+
 async function createFolder() {
   const name = await promptText('Neuer Ordner', '', 'Ordnername');
   if (!name) return;
@@ -629,8 +650,13 @@ export async function importPdfFile(file, name = file.name) {
     if (gn) {
       const { goodnotesToNotebook } = await import('./goodnotes.js');
       const doc = await goodnotesToNotebook(file);
-      pages = doc.pages;
       if (doc.name) title = doc.name;
+      if (doc.blocks) { // Goodnotes text document
+        const td = { ...newTextDoc({ name: title, parent }), blocks: doc.blocks };
+        await store.put(td);
+        return openTextDoc(td.id);
+      }
+      pages = doc.pages;
     } else pages = await pdfToPages(file);
     const nb = newNotebook({ name: title, parent, pages });
     await store.put(nb);
@@ -640,7 +666,7 @@ export async function importPdfFile(file, name = file.name) {
 
 // Clipboard import. Two kinds of content are understood:
 // - a copied PDF *file* (e.g. Goodnotes "Exportieren → Kopieren", Files "Kopieren")
-// - text from the iOS shortcut "In BadNotes öffnen": "NOTIZEN-PDF|<file name>|<base64>" (or plain base64)
+// - text from the iOS shortcut "In Folio öffnen": "NOTIZEN-PDF|<file name>|<base64>" (or plain base64)
 // Safari's clipboard API only hands out text and images, so for files we fall back to a paste
 // field: the system "Einfügen" (long press / Cmd+V) does deliver copied files to the page.
 const looksLikePdf = f => f && (f.type === 'application/pdf' || /\.(pdf|goodnotes)$/i.test(f.name || ''));
@@ -738,7 +764,10 @@ export async function openSettings() {
     h('div', { class: 'form-label' }, 'Google-Drive-Synchronisation'),
     clientId,
     h('div', { class: 'hint' }, 'OAuth-Client-ID aus der Google Cloud Console (siehe README).'),
-    h('div', { class: 'hint', style: { marginTop: '14px', textAlign: 'center' } }, `BadNotes · Version ${APP_VERSION}`));
+    h('div', { class: 'group-box', style: { marginTop: '10px' } },
+      toggle('Goodnotes-Kopien in Drive', settings.gnCopies !== false, v => { settings.gnCopies = v; saveSettings(); }),
+      h('div', { class: 'hint' }, 'Legt zu jedem Notizbuch eine .goodnotes-Datei im Drive-Ordner der App unter „Goodnotes“ ab (aktualisiert eine Minute nach der letzten Änderung). Öffnen in Goodnotes: Dateien-App → Google Drive.')),
+    h('div', { class: 'about' }, folioMark(40), h('div', {}, h('div', { class: 'about-name' }, 'Folio'), h('div', { class: 'hint' }, `Make space for ideas. · Version ${APP_VERSION}`))));
   const ok = await sheet({ title: 'Einstellungen', body });
   if (ok) { settings.clientId = clientId.value.trim(); saveSettings(); renderSidebar(); }
 }

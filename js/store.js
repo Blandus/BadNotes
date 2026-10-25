@@ -1,7 +1,8 @@
 import { uid } from './util.js';
+import { toRadius } from './ink.js';
 
 // Shown in the settings, to check which version a device is running. Raise with each update.
-export const APP_VERSION = '16';
+export const APP_VERSION = '31';
 
 export const PAGE_W = 1000;
 export const FORMATS = { a4: { label: 'A4 Hoch', h: 1414 }, a4l: { label: 'A4 Quer', h: 707 }, letter: { label: 'Letter', h: 1294 } };
@@ -14,7 +15,8 @@ export const TEMPLATE_SECTIONS = [
   ['Schreibpapier', ['cornell', 'notepad', 'twocol', 'threecol']],
 ];
 export const PAPERS = { white: { label: 'Weißes Papier', color: '#FFFFFF' }, yellow: { label: 'Gelbes Papier', color: '#FBF8EC' }, dark: { label: 'Dunkles Papier', color: '#2B2A2A' } };
-export const COVERS = ['#2E4A6B', '#3D7EB8', '#3F8F84', '#5B8C3E', '#D2A33A', '#D9792E', '#C2483F', '#A04A84', '#5D4C8E', '#3A3A3C', '#9A9AA0', '#E5D8C3'];
+// Cover colours derived from the Folio palette (navy, mist, sage, stone) plus a few quiet accents — no red
+export const COVERS = ['#0F2747', '#3E6E9F', '#8EB8E6', '#6B8F7E', '#4F7A66', '#A7B4C6', '#D9D2C6', '#B8A68A', '#C9A35B', '#7D6B91', '#3A3F4A', '#E8E3D8'];
 
 // ---------- Settings (per device) ----------
 export let settings = {};
@@ -28,12 +30,15 @@ export const emit = (type, detail) => bus.dispatchEvent(new CustomEvent(type, { 
 // Upgrades records written by older versions of the app.
 function migrate(r) {
   if (!r.kind) r.kind = 'notebook';
+  if (r.kind === 'textdoc') r.blocks ||= [];
   if (r.kind === 'notebook') {
     r.pages ||= [];
     for (const p of r.pages) {
       if (p.strokes) { p.elements = p.strokes.map(s => ({ type: 'stroke', pen: 'fountain', ...s })); delete p.strokes; }
       p.elements ||= [];
       for (const e of p.elements) e.id ||= uid();
+      // pressure strokes from older versions → radius per point (same look, see ink.js)
+      if (p.elements.some(e => e.type === 'stroke' && !e.rad && e.tool !== 'highlighter' && !e.shape)) p.elements = p.elements.map(toRadius);
     }
   }
   return r;

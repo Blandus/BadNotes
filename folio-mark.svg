@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Folio mark: three fanned paper layers (Mist Blue, Sage Green, Ink Navy) with a folded corner. Original artwork. -->
+  <rect x="8" y="12" width="28" height="40" rx="6" fill="#8EB8E6" transform="rotate(-20 22 32)"/>
+  <rect x="16" y="11" width="28" height="40" rx="6" fill="#6B8F7E" transform="rotate(-6 30 31)"/>
+  <g transform="rotate(8 40 36)">
+    <path d="M30 14H43L54 25V50a6 6 0 0 1-6 6H30a6 6 0 0 1-6-6V20a6 6 0 0 1 6-6Z" fill="#0F2747"/>
+    <path d="M43 14V21.5a3.5 3.5 0 0 0 3.5 3.5H54Z" fill="#FAF9F5"/>
+  </g>
+</svg>

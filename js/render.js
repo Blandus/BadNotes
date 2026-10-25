@@ -1,5 +1,7 @@
 import { PAGE_W, PAPERS } from './store.js';
 import { r1 } from './util.js';
+import { widthAt } from './ink.js';
+import { layout, drawRich, LINE_H } from './richtext.js';
 
 export const pageH = p => p.h || 1414;
 export const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif';
@@ -62,25 +64,8 @@ export function drawTemplate(ctx, t, h, dark = false) {
 export const paperColor = page => PAPERS[page.paper]?.color || '#FFFFFF';
 
 // ---------- Strokes ----------
-// Width multiplier as a function of pen pressure, per pen type.
-export const WIDTH_FN = {
-  fountain: p => 0.45 + 1.0 * p,
-  ball: p => 0.85 + 0.3 * p,
-  brush: p => 0.15 + 1.9 * p,
-};
-
-// Width of one stroke piece. s.press (0..1, default .5) scales how much pressure matters;
-// s.sharp (0..1) makes fountain/brush strokes direction-dependent like an angled nib
-// (thin when moving along the 45° nib, full width across it). Old strokes have neither
-// field and render exactly as before.
-const NIB = Math.PI / 4;
-export function pieceWidth(s, pressure, dx = 0, dy = 0) {
-  const f = WIDTH_FN[s.pen] || WIDTH_FN.fountain, mid = f(0.5);
-  const k = (s.press ?? 0.5) / 0.5;
-  let w = Math.max(0.15, mid + (f(pressure) - mid) * k);
-  if (s.sharp && s.pen !== 'ball' && (dx || dy)) w *= 1 - s.sharp * 0.6 * (1 - Math.abs(Math.sin(Math.atan2(dy, dx) - NIB)));
-  return s.width * w;
-}
+// Width model (radius per point, pressure for live/old strokes): see ink.js
+export { WIDTH_FN, pieceWidth, widthAt, toRadius } from './ink.js';
 
 export function drawStroke(ctx, s) {
   const p = s.points;
@@ -99,18 +84,18 @@ export function drawStroke(ctx, s) {
     ctx.stroke();
   } else {
     if (p.length === 1) {
-      ctx.beginPath(); ctx.arc(p[0][0], p[0][1], pieceWidth(s, p[0][2]) / 2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(p[0][0], p[0][1], widthAt(s, 0, 0, 0) / 2, 0, Math.PI * 2); ctx.fill();
     } else {
       // Quadratic curves through segment midpoints, each piece with its own width.
       let prev = p[0];
       for (let i = 1; i < p.length - 1; i++) {
         const m = [(p[i][0] + p[i + 1][0]) / 2, (p[i][1] + p[i + 1][1]) / 2];
-        ctx.lineWidth = pieceWidth(s, p[i][2], m[0] - prev[0], m[1] - prev[1]);
+        ctx.lineWidth = widthAt(s, i, m[0] - prev[0], m[1] - prev[1]);
         ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.quadraticCurveTo(p[i][0], p[i][1], m[0], m[1]); ctx.stroke();
         prev = m;
       }
       const last = p[p.length - 1];
-      ctx.lineWidth = pieceWidth(s, last[2], last[0] - prev[0], last[1] - prev[1]);
+      ctx.lineWidth = widthAt(s, p.length - 1, last[0] - prev[0], last[1] - prev[1]);
       ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.lineTo(last[0], last[1]); ctx.stroke();
     }
   }
@@ -118,30 +103,13 @@ export function drawStroke(ctx, s) {
 }
 
 // ---------- Text ----------
-export const LINE_H = 1.3;
+// Text boxes: rich text (runs with their own size / weight / style / font / colour), see richtext.js
+export { LINE_H, FONTS, fontFamily, cssFont as fontOf } from './richtext.js';
 export function textLines(t) {
-  measure.font = `${t.size}px ${FONT}`;
-  const out = [];
-  for (const para of (t.text || '').split('\n')) {
-    let line = '';
-    for (const w of para.split(/(\s+)/)) {
-      const test = line + w;
-      if (measure.measureText(test).width > t.w && line.trim()) { out.push(line.trimEnd()); line = w.trimStart(); }
-      else line = test;
-    }
-    out.push(line);
-  }
-  return out;
+  return layout(t, measure).lines.map(l => l.segs.map(s => s.text).join('').trimEnd());
 }
-export const textHeight = t => Math.max(1, textLines(t).length) * t.size * LINE_H;
-
-function drawText(ctx, t) {
-  ctx.save();
-  ctx.font = `${t.size}px ${FONT}`;
-  ctx.fillStyle = t.color; ctx.textBaseline = 'top';
-  textLines(t).forEach((l, i) => ctx.fillText(l, t.x, t.y + i * t.size * LINE_H + t.size * 0.15));
-  ctx.restore();
-}
+export const textHeight = t => Math.max(t.size * LINE_H, layout(t, measure).h);
+const drawText = (ctx, t) => drawRich(ctx, t, measure);
 
 // ---------- Pages ----------
 // ox/oy shift the output (in canvas pixels) so a cut-out of the page can be rendered.
@@ -190,10 +158,8 @@ export function bbox(e) {
     return { x: x0 - pad, y: y0 - pad, w: x1 - x0 + 2 * pad, h: y1 - y0 + 2 * pad };
   }
   if (e.type === 'text') {
-    const lines = textLines(e);
-    measure.font = `${e.size}px ${FONT}`;
-    const w = Math.max(e.size, ...lines.map(l => measure.measureText(l).width));
-    return { x: e.x, y: e.y, w, h: Math.max(1, lines.length) * e.size * LINE_H };
+    const l = layout(e, measure);
+    return { x: e.x, y: e.y, w: Math.max(e.size, l.w), h: Math.max(e.size * LINE_H, l.h) };
   }
   return { x: e.x, y: e.y, w: e.w, h: e.h };
 }
@@ -210,9 +176,11 @@ export function unionBox(els) {
 // Returns a transformed copy. fn maps page coordinates; k scales sizes.
 export function transformEl(e, fn, k = 1) {
   if (e.type === 'stroke') {
-    return { ...e, width: e.width * k, points: e.points.map(p => { const [x, y] = fn(p[0], p[1]); return [r1(x), r1(y), p[2]]; }) };
+    // radius strokes scale their per-point radius with the size; pressure stays pressure
+    const r = e.rad ? v => Math.round(v * k * 100) / 100 : v => v;
+    return { ...e, width: e.width * k, points: e.points.map(p => { const [x, y] = fn(p[0], p[1]); return [r1(x), r1(y), r(p[2])]; }) };
   }
   const [x, y] = fn(e.x, e.y);
-  if (e.type === 'text') return { ...e, x, y, w: e.w * k, size: e.size * k };
+  if (e.type === 'text') return { ...e, x, y, w: e.w * k, size: e.size * k, ...(e.runs ? { runs: e.runs.map(r => (r.size ? { ...r, size: r.size * k } : r)) } : {}) };
   return { ...e, x, y, w: e.w * k, h: e.h * k };
 }
