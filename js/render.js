@@ -63,11 +63,24 @@ export const paperColor = page => PAPERS[page.paper]?.color || '#FFFFFF';
 
 // ---------- Strokes ----------
 // Width multiplier as a function of pen pressure, per pen type.
-const WIDTH_FN = {
+export const WIDTH_FN = {
   fountain: p => 0.45 + 1.0 * p,
   ball: p => 0.85 + 0.3 * p,
   brush: p => 0.15 + 1.9 * p,
 };
+
+// Width of one stroke piece. s.press (0..1, default .5) scales how much pressure matters;
+// s.sharp (0..1) makes fountain/brush strokes direction-dependent like an angled nib
+// (thin when moving along the 45° nib, full width across it). Old strokes have neither
+// field and render exactly as before.
+const NIB = Math.PI / 4;
+export function pieceWidth(s, pressure, dx = 0, dy = 0) {
+  const f = WIDTH_FN[s.pen] || WIDTH_FN.fountain, mid = f(0.5);
+  const k = (s.press ?? 0.5) / 0.5;
+  let w = Math.max(0.15, mid + (f(pressure) - mid) * k);
+  if (s.sharp && s.pen !== 'ball' && (dx || dy)) w *= 1 - s.sharp * 0.6 * (1 - Math.abs(Math.sin(Math.atan2(dy, dx) - NIB)));
+  return s.width * w;
+}
 
 export function drawStroke(ctx, s) {
   const p = s.points;
@@ -85,20 +98,19 @@ export function drawStroke(ctx, s) {
     if (s.closed) ctx.closePath();
     ctx.stroke();
   } else {
-    const f = WIDTH_FN[s.pen] || WIDTH_FN.fountain;
     if (p.length === 1) {
-      ctx.beginPath(); ctx.arc(p[0][0], p[0][1], s.width * f(p[0][2]) / 2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(p[0][0], p[0][1], pieceWidth(s, p[0][2]) / 2, 0, Math.PI * 2); ctx.fill();
     } else {
       // Quadratic curves through segment midpoints, each piece with its own width.
       let prev = p[0];
       for (let i = 1; i < p.length - 1; i++) {
         const m = [(p[i][0] + p[i + 1][0]) / 2, (p[i][1] + p[i + 1][1]) / 2];
-        ctx.lineWidth = s.width * f(p[i][2]);
+        ctx.lineWidth = pieceWidth(s, p[i][2], m[0] - prev[0], m[1] - prev[1]);
         ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.quadraticCurveTo(p[i][0], p[i][1], m[0], m[1]); ctx.stroke();
         prev = m;
       }
       const last = p[p.length - 1];
-      ctx.lineWidth = s.width * f(last[2]);
+      ctx.lineWidth = pieceWidth(s, last[2], last[0] - prev[0], last[1] - prev[1]);
       ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.lineTo(last[0], last[1]); ctx.stroke();
     }
   }

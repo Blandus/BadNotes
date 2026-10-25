@@ -1,6 +1,8 @@
 import { uid } from './util.js';
 import { store, settings, saveSettings, bus, newNotebook, newFolder, newPage, COVERS } from './store.js';
-import { renderLibrary, applyTheme } from './library.js';
+import { renderLibrary, applyTheme, importPdfFile, importFromClipboard } from './library.js';
+import { h } from './util.js';
+import { icon } from './icons.js';
 import { initEditor, openDoc, flushSave, isLocked, ed } from './editor.js';
 import { initTools } from './tools.js';
 import { configureSync, scheduleSync } from './sync.js';
@@ -34,6 +36,30 @@ async function seed() {
   settings.seeded = true; saveSettings();
 }
 
+// Drag a PDF from Files (or the desktop) onto the app to import it.
+const isPdf = f => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+document.addEventListener('dragover', e => { if ([...e.dataTransfer.items].some(i => i.kind === 'file')) e.preventDefault(); });
+document.addEventListener('drop', e => {
+  const pdfs = [...e.dataTransfer.files].filter(isPdf);
+  if (!pdfs.length) return;
+  e.preventDefault();
+  importPdfFile(pdfs[0]);
+});
+
+// After the shortcut "In Notizen öffnen" has been used once, coming back to the app shows a
+// one-tap import button for a few seconds (reading the clipboard needs a tap on iOS).
+let clipHint = null;
+function offerClipboardImport() {
+  if (!settings.clipImport || document.querySelector('.backdrop')) return;
+  clipHint?.remove();
+  clipHint = h('button', { class: 'clip-hint', onclick: () => { clipHint.remove(); clipHint = null; importFromClipboard(); } },
+    icon('paste', 18), 'PDF aus Zwischenablage importieren');
+  document.body.append(clipHint);
+  const el = clipHint;
+  setTimeout(() => { if (clipHint === el) { el.remove(); clipHint = null; } }, 7000);
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') offerClipboardImport(); });
+
 (async () => {
   applyTheme();
   await store.open();
@@ -44,5 +70,6 @@ async function seed() {
   await seed();
   if (settings.activeTab && ed.tabs.includes(settings.activeTab)) openDoc(settings.activeTab);
   else renderLibrary();
+  offerClipboardImport();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 })();

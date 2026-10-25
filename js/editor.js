@@ -1,17 +1,21 @@
 import { $, h, uid, clamp, debounce, pickFile, onContext } from './util.js';
 import { icon } from './icons.js';
 import { store, settings, saveSettings, bus, PAGE_W, newPage, TEMPLATES } from './store.js';
-import { renderPage, renderThumb, pageH } from './render.js';
-import { menu, popover, sheet, toast, segmented, closePopover, promptText } from './ui.js';
+import { renderPage, renderThumb, pageH, drawStroke } from './render.js';
+import { menu, popover, sheet, toast, segmented, closePopover, promptText, toggle } from './ui.js';
 import { exportPdf, exportPng, loadImageFile } from './pdf.js';
 import { renderLibrary, templatePicker, openSettings } from './library.js';
 import { clearSelection, renderSelection, finishText, selectIds, hasSelection, deleteSelection } from './tools.js';
 
-const MAX_CANVAS_PX = 8e6; // iPad Safari canvas memory limit per canvas
+const MAX_CANVAS_PX = 16e6; // iPad Safari's per-canvas limit (16.7 MP); few pages are kept rendered
 
 // ---------- Tool configuration (per device) ----------
 const DEFAULT_TOOLS = {
-  pen: { pen: 'fountain', colors: ['#1A1A1A', '#1F4FD1', '#D12F2F'], color: 0, widths: [1.5, 3, 5], width: 1 },
+  pen: {
+    pen: 'fountain', colors: ['#1A1A1A', '#1F4FD1', '#D12F2F'], color: 0, widths: [1.5, 3, 5], width: 1,
+    sharp: 0.5, press: 0.5, stab: 0, // tip sharpness, pressure sensitivity, stroke stabilisation (0..1)
+    drawHold: true, scribble: true, scribbleAll: true, circleLasso: true,
+  },
   highlighter: { colors: ['#FFE14D', '#7CE38B', '#FF8AD0'], color: 0, widths: [12, 20, 30], width: 1, straight: false },
   shapes: { colors: ['#1A1A1A', '#1F4FD1', '#D12F2F'], color: 0, widths: [1.5, 3, 5], width: 1 },
   eraser: { sizes: [6, 14, 30], size: 1, mode: 'precise', hlOnly: false },
@@ -29,7 +33,7 @@ export const saveTools = debounce(saveSettings, 300);
 const TOOLS = [
   ['pen', 'Stift', 'pen'], ['eraser', 'Radierer', 'eraser'], ['highlighter', 'Textmarker', 'highlighter'],
   ['text', 'Text', 'text'], ['shapes', 'Formen', 'shapes'], ['image', 'Bild', 'image'],
-  ['laser', 'Laserpointer', 'laser'],
+  ['laser', 'Laserpointer', 'laser'], ['screenshot', 'Screenshot', 'screenshot'],
 ];
 export const PALETTE = ['#000000', '#4A4A4A', '#8E8E93', '#FFFFFF', '#1F4FD1', '#2E8BFF', '#36B7E8', '#1F8A4C', '#5BC236', '#F2C200',
   '#FF9500', '#D12F2F', '#FF2D55', '#AF52DE', '#8E5A2B', '#FFE14D', '#7CE38B', '#8FD3FF', '#FF8AD0', '#FFB86B'];
@@ -145,7 +149,9 @@ export function commit(page, next) {
   hist().undo.push({ pageId: page.id, before: page.elements, after: next });
   hist().redo = [];
   page.elements = next;
-  refreshPage(page); changed(); updateChrome();
+  const done = refreshPage(page);
+  changed(); updateChrome();
+  return done;
 }
 export function commitPages(next) {
   hist().undo.push({ pages: true, before: ed.doc.pages, after: next });
@@ -175,12 +181,12 @@ const observer = new IntersectionObserver(entries => {
     if (e.isIntersecting) { visible.add(e.target); renderEl(e.target); }
     else { visible.delete(e.target); e.target._canvas.width = 0; e.target._canvas.height = 0; }
   }
-}, { root: sc, rootMargin: '800px 0px' });
+}, { root: sc, rootMargin: '300px 0px' });
 
 export async function renderEl(el) {
   visible.add(el);
   const c = el._canvas, page = el._page, ph = pageH(page);
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
   const scale = Math.min(el.clientWidth * dpr / PAGE_W, Math.sqrt(MAX_CANVAS_PX / (PAGE_W * ph)));
   const w = Math.round(PAGE_W * scale), hh = Math.round(ph * scale);
   // Draw offscreen, then swap in one go to avoid flicker.
@@ -196,9 +202,10 @@ export async function renderEl(el) {
 export const elForPage = page => ed.pageEls.find(el => el._page === page);
 export function refreshPage(page) {
   const el = elForPage(page);
-  if (el && visible.has(el)) renderEl(el);
+  const done = el && visible.has(el) ? renderEl(el) : Promise.resolve();
   scheduleThumb(page);
   if (ed.sel?.page === page) renderSelection();
+  return done;
 }
 const rerenderVisible = () => visible.forEach(renderEl);
 
@@ -605,6 +612,91 @@ function optDrop(ic, label, items) {
   return h('button', { class: 'opt-drop', onclick: e => menu(e.currentTarget, items) }, icon(ic, 18), h('span', {}, label), icon('chevronDown', 14));
 }
 const PENS = [['fountain', 'Füller', 'nibFountain'], ['ball', 'Kugelschreiber', 'nibBall'], ['brush', 'Pinsel', 'nibBrush']];
+const PEN_TITLES = { fountain: 'Füllfederhalter', ball: 'Kugelschreiber', brush: 'Pinselstift' };
+
+// Pen settings popover (as in Goodnotes): preview, pen type, three sliders,
+// "Zeichnen und Halten" and a "Stiftgesten" subpage.
+function penPopover(anchor) {
+  const cfg = T.pen;
+  const wrap = h('div', { class: 'penpop' });
+  const set = (k, v) => { cfg[k] = v; saveTools(); };
+
+  const preview = h('canvas', { class: 'pen-preview' });
+  function drawPreview() {
+    const w = 560, hh = 170;
+    preview.width = w; preview.height = hh;
+    const ctx = preview.getContext('2d');
+    ctx.setTransform(2, 0, 0, 2, 0, 0);
+    // S-curve with pressure rising then falling, like a natural stroke
+    const pts = Array.from({ length: 90 }, (_, i) => {
+      const t = i / 89;
+      return [30 + t * 220, 45 - Math.sin(t * Math.PI * 2 - 0.4) * 22, 0.25 + 0.6 * Math.sin(t * Math.PI)];
+    });
+    drawStroke(ctx, {
+      tool: 'pen', pen: cfg.pen, color: getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#000',
+      width: Math.max(4, cfg.widths[cfg.width] * 2.4), sharp: cfg.sharp, press: cfg.press, points: pts,
+    });
+  }
+
+  function slider(label, key) {
+    const val = h('span', { class: 'pp-val mono' }, Math.round(cfg[key] * 100) + ' %');
+    const input = h('input', {
+      type: 'range', class: 'pp-range', min: 0, max: 100, step: 1, value: Math.round(cfg[key] * 100), 'aria-label': label,
+      oninput: e => {
+        set(key, e.target.value / 100);
+        val.textContent = e.target.value + ' %';
+        input.style.setProperty('--v', e.target.value + '%');
+        drawPreview();
+      },
+    });
+    input.style.setProperty('--v', Math.round(cfg[key] * 100) + '%');
+    return h('div', { class: 'pp-slider' },
+      h('div', { class: 'pp-label' }, h('span', {}, label), val),
+      h('div', { class: 'pp-track' }, input, h('div', { class: 'pp-ticks' }, [0, 1, 2, 3, 4].map(() => h('span')))));
+  }
+
+  function mainPage() {
+    wrap.replaceChildren(
+      h('div', { class: 'pp-title' }, PEN_TITLES[cfg.pen]),
+      preview,
+      h('div', { class: 'pp-types' }, PENS.map(([k, , ic]) => h('button', {
+        class: 'pp-type' + (cfg.pen === k ? ' active' : ''),
+        onclick: () => {
+          set('pen', k); mainPage();
+          // keep the toolbar button in sync without re-rendering it (it anchors this popover)
+          anchor.replaceChildren(icon(ic, 18), h('span', {}, PENS.find(p => p[0] === k)[1]), icon('chevronDown', 14));
+        },
+      }, icon(ic, 26), h('span', {}, PEN_TITLES[k])))),
+      h('div', { class: 'pp-sep' }),
+      slider('Schärfe der Spitze', 'sharp'),
+      slider('Druckempfindlichkeit', 'press'),
+      slider('Strich-Stabilisierung', 'stab'),
+      h('div', { class: 'pp-sep' }),
+      h('div', { class: 'pp-section' }, 'Einstellungen'),
+      toggle('Zeichnen und Halten', cfg.drawHold, v => set('drawHold', v)),
+      h('button', { class: 'pp-row', onclick: gesturesPage }, h('span', {}, 'Stiftgesten'), icon('chevronRight', 18)));
+    drawPreview();
+  }
+
+  function gesturesPage() {
+    const all = toggle('Formen und Textmarker löschen', cfg.scribbleAll, v => set('scribbleAll', v));
+    const syncAll = () => all.classList.toggle('disabled', !cfg.scribble);
+    wrap.replaceChildren(
+      h('div', { class: 'pp-head' },
+        h('button', { class: 'pp-back', title: 'Zurück', onclick: mainPage }, icon('chevronLeft', 20)),
+        h('span', {}, 'Stiftgesten')),
+      toggle('Kritzeln zum Löschen', cfg.scribble, v => { set('scribble', v); syncAll(); }),
+      all,
+      h('div', { class: 'pp-hint' }, 'Handschrift und Zeichnungen durch Überkritzeln löschen'),
+      h('div', { class: 'pp-sep' }),
+      toggle('Umkreisen für Lasso', cfg.circleLasso, v => set('circleLasso', v)),
+      h('div', { class: 'pp-hint' }, 'Zeichne um etwas herum, um es auszuwählen und zu verschieben'));
+    syncAll();
+  }
+
+  mainPage();
+  popover(anchor, wrap, { className: 'penpop-wrap' });
+}
 
 export function renderOptions() {
   const t = ed.tool, cfg = T[t];
@@ -612,7 +704,7 @@ export function renderOptions() {
   if (t === 'pen') {
     const cur = PENS.find(p => p[0] === cfg.pen) || PENS[0];
     parts = [
-      optDrop(cur[2], cur[1], PENS.map(([k, l]) => ({ label: l, checked: cfg.pen === k, action: () => { cfg.pen = k; saveTools(); renderOptions(); } }))),
+      h('button', { class: 'opt-drop', onclick: e => penPopover(e.currentTarget) }, icon(cur[2], 18), h('span', {}, cur[1]), icon('chevronDown', 14)),
       colorSlots(cfg), sep(), widthSlots(cfg, 12, 2.6), sep(), presetsButton('pen'),
     ];
   } else if (t === 'highlighter') {
@@ -647,6 +739,8 @@ export function renderOptions() {
     sep(), h('span', { class: 'opt-hint' }, 'Auf die Seite tippen, um ein Textfeld zu erstellen')];
   } else if (t === 'laser') {
     parts = [colorSlots(cfg), sep(), h('span', { class: 'opt-hint' }, 'Die Spur verschwindet automatisch')];
+  } else if (t === 'screenshot') {
+    parts = [h('span', { class: 'opt-hint', style: { padding: '0 8px' } }, 'Bereich aufziehen – oder auf die Seite tippen für die ganze Seite')];
   }
   optbar.replaceChildren(h('div', { class: 'opt-inner' }, parts.flat()));
 }

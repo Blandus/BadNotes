@@ -235,6 +235,7 @@ function newMenu(anchor) {
     { label: 'Ordner', icon: 'folder', action: createFolder },
     '-',
     { label: 'PDF importieren', icon: 'pdf', action: importPdf },
+    { label: 'PDF aus Zwischenablage', icon: 'paste', action: importFromClipboard },
     { label: 'Bild importieren', icon: 'image', action: importImage },
   ]);
 }
@@ -277,22 +278,29 @@ async function duplicate(ids) {
   toast(copies.length === 1 ? 'Dupliziert' : `${copies.length} Dokumente dupliziert`);
 }
 
-async function moveItems(ids) {
-  const moving = new Set(ids.flatMap(id => [id, ...descendants(id).map(d => d.id)]));
-  const folders = live().filter(r => r.kind === 'folder' && !r.trashed && !moving.has(r.id));
-  let target = undefined;
+// Folder picker sheet. Resolves to a folder id, null for the top level, or undefined when cancelled.
+async function pickFolder(title, doneLabel, { exclude = new Set(), preselect } = {}) {
+  records = await store.all();
+  const folders = live().filter(r => r.kind === 'folder' && !r.trashed && !exclude.has(r.id));
+  let target = preselect;
   const tree = (parent, depth) => folders.filter(f => (f.parent || null) === parent).sort((a, b) => a.name.localeCompare(b.name, 'de'))
     .flatMap(f => [opt(f.id, f.name, depth), ...tree(f.id, depth + 1)]);
   const list = h('div', { class: 'pick-list' });
   function opt(id, name, depth) {
     return h('button', {
-      class: 'pick-item', style: { paddingLeft: 14 + depth * 22 + 'px' },
+      class: 'pick-item' + (id === preselect ? ' active' : ''), style: { paddingLeft: 14 + depth * 22 + 'px' },
       onclick: e => { target = id; list.querySelectorAll('.pick-item').forEach(b => b.classList.toggle('active', b === e.currentTarget)); },
     }, icon('folder', 18), h('span', {}, name));
   }
   list.append(opt(null, 'Dokumente', 0), ...tree(null, 1));
-  const ok = await sheet({ title: 'Verschieben nach', body: list, done: 'Verschieben', onDone: () => target !== undefined || (toast('Bitte einen Ordner wählen'), false) });
-  if (!ok) return;
+  const ok = await sheet({ title, body: list, done: doneLabel, onDone: () => target !== undefined || (toast('Bitte einen Ordner wählen'), false) });
+  return ok ? target : undefined;
+}
+
+async function moveItems(ids) {
+  const moving = new Set(ids.flatMap(id => [id, ...descendants(id).map(d => d.id)]));
+  const target = await pickFolder('Verschieben nach', 'Verschieben', { exclude: moving });
+  if (target === undefined) return;
   const now = Date.now();
   await store.putMany(ids.map(byId).map(r => Object.assign(r, { parent: target, updated: now })));
   lib.selecting = false; lib.selected.clear();
@@ -492,12 +500,34 @@ async function createFolder() {
 
 async function importPdf() {
   const f = await pickFile('application/pdf');
-  if (!f) return;
+  if (f) importPdfFile(f);
+}
+
+// Shared PDF import (file picker, drag & drop, clipboard): ask where to save, then convert and open.
+export async function importPdfFile(file, name = file.name) {
+  const title = (name || 'Importiertes PDF').replace(/\.pdf$/i, '');
+  const parent = await pickFolder(`„${title}“ speichern in`, 'Speichern', { preselect: lib.section === 'docs' ? lib.folder : null });
+  if (parent === undefined) return;
   try {
-    const nb = newNotebook({ name: f.name.replace(/\.pdf$/i, ''), parent: lib.section === 'docs' ? lib.folder : null, pages: await pdfToPages(f) });
+    const nb = newNotebook({ name: title, parent, pages: await pdfToPages(file) });
     await store.put(nb);
     openDoc(nb.id);
   } catch (err) { toast('Import fehlgeschlagen: ' + err.message, 5000); }
+}
+
+// Clipboard import, used with the iOS shortcut "In Notizen öffnen" (see README):
+// the shortcut copies "NOTIZEN-PDF|<file name>|<base64>" — plain base64 of a PDF works too.
+export async function importFromClipboard() {
+  let text;
+  try { text = (await navigator.clipboard.readText()).trim(); } catch { return toast('Kein Zugriff auf die Zwischenablage', 3000); }
+  let name = 'Importiertes PDF', b64 = text;
+  const m = text.match(/^NOTIZEN-PDF\|([^|]*)\|([\s\S]+)$/);
+  if (m) { name = m[1] || name; b64 = m[2]; }
+  b64 = b64.replace(/\s+/g, '');
+  if (!b64.startsWith('JVBER')) return toast('Keine PDF in der Zwischenablage', 3000); // "%PDF" in base64
+  const blob = await (await fetch('data:application/pdf;base64,' + b64)).blob();
+  if (!settings.clipImport) { settings.clipImport = true; saveSettings(); } // from now on offer it when the app is opened
+  importPdfFile(blob, name);
 }
 
 async function importImage() {

@@ -2,7 +2,7 @@
 import { $, h, uid, r1 } from './util.js';
 import { icon } from './icons.js';
 import { settings, PAGE_W } from './store.js';
-import { bbox, unionBox, transformEl, drawStroke, pageH, FONT, LINE_H } from './render.js';
+import { bbox, unionBox, transformEl, drawStroke, pageH, renderPage, FONT, LINE_H, pieceWidth } from './render.js';
 import {
   ed, T, sc, commit, renderEl, elForPage, setZoom, undo, redo, selectTool, renderOptions,
   scrollToPage, currentPage, toggleSearch, PALETTE,
@@ -18,9 +18,14 @@ let clipboard = null;
 export function initTools() {
   overlay = $('#overlay');
   octx = overlay.getContext('2d');
-  sizeOverlay();
-  window.addEventListener('resize', sizeOverlay);
-  new ResizeObserver(sizeOverlay).observe(overlay.parentElement);
+  ink = $('#ink');
+  ictx = ink.getContext('2d', { desynchronized: true });
+  const resize = () => { sizeOverlay(); sizeInk(); };
+  resize();
+  window.addEventListener('resize', resize);
+  new ResizeObserver(resize).observe(overlay.parentElement);
+  // Ink is in screen coordinates; a pending finished stroke would drift when scrolling.
+  sc.addEventListener('scroll', () => { if (pendingInk && !drawing) { pendingInk = 0; clearInk(); } });
   sc.addEventListener('pointerdown', onDown);
   sc.addEventListener('pointermove', onMove);
   sc.addEventListener('pointerup', e => onUp(e, true));
@@ -43,10 +48,45 @@ function sizeOverlay() {
 }
 
 // ---------- Geometry ----------
-function toPage(e, el) {
-  const r = el.getBoundingClientRect();
+// rect: the page's bounding box, cached for the duration of a stroke (reading layout per event is slow)
+// raw = true skips rounding (used for pen input, which is smoothed before it is stored)
+function toPage(e, el, r = el.getBoundingClientRect(), raw = false) {
   const p = e.pointerType === 'pen' ? (e.pressure || 0.5) : 0.5;
-  return [r1((e.clientX - r.left) / r.width * PAGE_W), r1((e.clientY - r.top) / r.height * pageH(el._page)), Math.round(p * 100) / 100];
+  const x = (e.clientX - r.left) / r.width * PAGE_W, y = (e.clientY - r.top) / r.height * pageH(el._page);
+  return raw ? [x, y, p] : [r1(x), r1(y), Math.round(p * 100) / 100];
+}
+
+// Input smoothing. Pointer positions arrive in whole screen pixels; when zoomed out one
+// pixel is a large step on the page, so a raw stroke is a staircase that stays visible
+// when zooming in later. Points are filtered (exponential smoothing) and points closer
+// than ~0.6 screen px are dropped, so the stored stroke is a smooth curve.
+// Stabilisation (0..1) lowers the filter factor: 0 → 0.45 (light), 1 → 0.08 (very steady, more lag).
+function addPoint(d, raw) {
+  const a = 0.45 - 0.37 * d.smooth;
+  const f = d.filt ? d.filt.map((v, i) => v + (raw[i] - v) * a) : raw;
+  d.filt = f;
+  d.lastRaw = raw;
+  const p = d.stroke.points, last = p[p.length - 1];
+  const minDist = 0.6 * PAGE_W / d.rect.width;
+  if (Math.hypot(f[0] - last[0], f[1] - last[1]) < minDist) return;
+  p.push([r1(f[0]), r1(f[1]), Math.round(f[2] * 100) / 100]);
+}
+// On lift-off: catch up to the real end point, then a light [1,2,1] pass over the interior.
+function finishPoints(d) {
+  const p = d.stroke.points;
+  if (d.lastRaw && Math.hypot(d.lastRaw[0] - p[p.length - 1][0], d.lastRaw[1] - p[p.length - 1][1]) > 0.6 * PAGE_W / d.rect.width) {
+    p.push([r1(d.lastRaw[0]), r1(d.lastRaw[1]), Math.round(d.lastRaw[2] * 100) / 100]);
+  }
+  if (p.length < 4) return p;
+  let pts = p;
+  for (let pass = 0; pass < 2 + Math.round(d.smooth * 4); pass++) {
+    pts = pts.map((q, i) => i === 0 || i === pts.length - 1 ? q : [
+      r1((pts[i - 1][0] + 2 * q[0] + pts[i + 1][0]) / 4),
+      r1((pts[i - 1][1] + 2 * q[1] + pts[i + 1][1]) / 4),
+      Math.round((pts[i - 1][2] + 2 * q[2] + pts[i + 1][2]) / 4 * 100) / 100,
+    ]);
+  }
+  return pts;
 }
 function distToSeg(p, a, b) {
   const dx = b[0] - a[0], dy = b[1] - a[1], len = dx * dx + dy * dy;
@@ -139,9 +179,15 @@ function recognize(points) {
 
 // ---------- Pointer routing ----------
 function onDown(e) {
-  if (e.target.closest('.sel-menu, .text-editor')) return;
+  if (e.target.closest('.sel-menu, .text-editor, .lasso-hint')) return;
+  removeLassoHint();
+  // Shape corner handles can be dragged with pen, finger or mouse.
+  const handle = e.target.closest('.shape-handle');
+  if (handle && !drawing) return startVertexDrag(e, handle);
+  hideShapeHandles();
   if (e.pointerType === 'touch') {
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    tap = touches.size === 1 ? { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() } : null;
     if (settings.fingerDraw && touches.size === 1 && !drawing) return start(e);
     if (drawing?.touch) cancelDrawing();
     startGesture();
@@ -162,8 +208,9 @@ function start(e) {
   try { sc.setPointerCapture(e.pointerId); } catch {}
   const idx = ed.pageEls.indexOf(el);
   if (idx >= 0) ed.cur = idx;
-  const base = { el, page: el._page, id: e.pointerId, touch: e.pointerType === 'touch' };
-  const pt = toPage(e, el);
+  const rect = el.getBoundingClientRect();
+  const base = { el, page: el._page, id: e.pointerId, touch: e.pointerType === 'touch', rect, stage: ink.parentElement.getBoundingClientRect() };
+  const pt = toPage(e, el, rect);
   ed.busy = true;
   switch (ed.tool) {
     case 'pen': case 'highlighter': case 'shapes': return startStroke(base, pt);
@@ -171,6 +218,7 @@ function start(e) {
     case 'lasso': return startLasso(base, pt, e);
     case 'text': drawing = { ...base, kind: 'text', pt }; return; // acts on pointerup (keyboard focus needs a tap)
     case 'laser': drawing = { ...base, kind: 'laser', stroke: uid() }; return addLaser(e);
+    case 'screenshot': drawing = { ...base, kind: 'shot', from: [e.clientX, e.clientY], to: [e.clientX, e.clientY] }; return;
   }
 }
 
@@ -181,11 +229,18 @@ function onMove(e) {
     if (!evs.length) evs = [e];
     const d = drawing;
     if (d.kind === 'stroke') {
-      if (d.straight) d.stroke.points = [d.stroke.points[0], toPage(e, d.el)];
-      else for (const ev of evs) d.stroke.points.push(toPage(ev, d.el));
-      queueLive();
+      if (d.straight) d.stroke.points = [d.stroke.points[0], toPage(e, d.el, d.rect)];
+      else if (!d.snapped) for (const ev of evs) addPoint(d, toPage(ev, d.el, d.rect, true));
+      if (!d.snapped) { queueLive(); watchHold(d, e); }
+      else if (d.snapped.pts.length === 2 && !d.snapped.closed) {
+        // Snapped line: keep holding and move to place the end point.
+        const p = toPage(e, d.el, d.rect);
+        d.snapped.pts[1] = snapAngle(d.snapped.pts[0], p);
+        clearInk(); inkTransform(d);
+        drawStroke(ictx, toShape(d.stroke, d.snapped));
+      }
     } else if (d.kind === 'erase') {
-      for (const ev of evs) eraseTo(toPage(ev, d.el));
+      for (const ev of evs) eraseTo(toPage(ev, d.el, d.rect));
       d.cursor = [e.clientX, e.clientY]; drawOverlay();
     } else if (d.kind === 'lasso') {
       for (const ev of evs) { d.path.push([ev.clientX, ev.clientY]); d.pagePts.push(toPage(ev, d.el)); }
@@ -194,6 +249,10 @@ function onMove(e) {
       transformSelection(toPage(e, d.el));
     } else if (d.kind === 'laser') {
       for (const ev of evs) addLaser(ev);
+    } else if (d.kind === 'shot') {
+      d.to = [e.clientX, e.clientY]; drawOverlay();
+    } else if (d.kind === 'vertex') {
+      moveVertex(d, toPage(e, d.el, d.rect));
     }
     return;
   }
@@ -213,12 +272,201 @@ let hoverCursor = null;
 function onUp(e, ok) {
   if (drawing && e.pointerId === drawing.id) finish(ok);
   if (touches.delete(e.pointerId)) startGesture();
+  if (ok && e.pointerType === 'touch') detectDoubleTap(e);
+}
+
+// Finger double-tap toggles pen ↔ eraser. (The Apple Pencil's own double-tap is only
+// delivered to native apps, not to Safari/web apps, so this is the closest substitute.)
+let tap = null, lastTap = null;
+function detectDoubleTap(e) {
+  const t = tap; tap = null;
+  if (!t || t.id !== e.pointerId || settings.fingerDraw || touches.size) return;
+  const now = performance.now();
+  if (now - t.t > 250 || Math.hypot(e.clientX - t.x, e.clientY - t.y) > 12) { lastTap = null; return; }
+  showShapeHandlesAt(e.clientX, e.clientY);
+  if (lastTap && now - lastTap.t < 350 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 60) {
+    lastTap = null;
+    togglePenEraser();
+  } else lastTap = { x: e.clientX, y: e.clientY, t: now };
+}
+let toolBeforeEraser = 'pen';
+export function togglePenEraser() {
+  if (ed.tool === 'eraser') selectTool(toolBeforeEraser);
+  else { toolBeforeEraser = ed.tool; selectTool('eraser'); }
+  toast(ed.tool === 'eraser' ? 'Radierer' : { pen: 'Stift', highlighter: 'Textmarker', shapes: 'Formen' }[ed.tool] || 'Werkzeug gewechselt', 900);
+}
+
+// Snaps the end point b to a perfect 0°/45°/90°/… angle around a when within 6° of it.
+const SNAP_DEG = 6;
+function snapAngle(a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
+  if (len < 1) return [b[0], b[1]];
+  const ang = Math.atan2(dy, dx), step = Math.PI / 4;
+  const target = Math.round(ang / step) * step;
+  if (Math.abs(ang - target) > SNAP_DEG * Math.PI / 180) return [b[0], b[1]];
+  return [r1(a[0] + Math.cos(target) * len), r1(a[1] + Math.sin(target) * len)];
+}
+
+// ---------- Shape corner handles ----------
+// A finger tap on a shape shows its corner points; dragging one moves it.
+// Polygons and lines: one handle per vertex. Ellipses: four corners of their bounding box.
+let handles = null; // { el, page, id }
+const isEllipse = s => s.closed && s.points.length > 12;
+function shapeCorners(s) {
+  if (!isEllipse(s)) return s.points.map(p => [p[0], p[1]]);
+  const xs = s.points.map(p => p[0]), ys = s.points.map(p => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+}
+function hideShapeHandles() {
+  if (!handles) return;
+  handles.el.querySelectorAll('.shape-handle').forEach(n => n.remove());
+  handles = null;
+}
+function renderShapeHandles() {
+  if (!handles) return;
+  const { el, page, id } = handles;
+  el.querySelectorAll('.shape-handle').forEach(n => n.remove());
+  const s = page.elements.find(e => e.id === id);
+  if (!s) { handles = null; return; }
+  const ph = pageH(page);
+  shapeCorners(s).forEach(([x, y], i) => el.append(h('div', {
+    class: 'shape-handle', 'data-i': i, style: { left: x / PAGE_W * 100 + '%', top: y / ph * 100 + '%' },
+  })));
+}
+function showShapeHandlesAt(cx, cy) {
+  const el = document.elementFromPoint(cx, cy)?.closest('.page');
+  if (!el) return;
+  const pt = toPage({ clientX: cx, clientY: cy }, el);
+  const s = [...el._page.elements].reverse().find(e => e.type === 'stroke' && e.shape && strokeHit(e, pt, pt, e.width / 2 + 14));
+  if (!s) return;
+  handles = { el, page: el._page, id: s.id };
+  renderShapeHandles();
+}
+function startVertexDrag(e, handle) {
+  e.preventDefault();
+  try { sc.setPointerCapture(e.pointerId); } catch {}
+  const { el, page, id } = handles;
+  drawing = {
+    kind: 'vertex', el, page, id: e.pointerId, shapeId: id, idx: +handle.dataset.i,
+    rect: el.getBoundingClientRect(), before: page.elements, touch: false,
+  };
+  ed.busy = true;
+}
+function moveVertex(d, pt) {
+  const s = d.before.find(e => e.id === d.shapeId);
+  let points;
+  if (isEllipse(s)) {
+    // Opposite corner stays fixed; the ellipse is refitted into the new box.
+    const c = shapeCorners(s), fixed = c[(d.idx + 2) % 4];
+    const x0 = Math.min(fixed[0], pt[0]), x1 = Math.max(fixed[0], pt[0]), y0 = Math.min(fixed[1], pt[1]), y1 = Math.max(fixed[1], pt[1]);
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, rx = Math.max(2, (x1 - x0) / 2), ry = Math.max(2, (y1 - y0) / 2);
+    points = s.points.map((_, i) => { const a = i / s.points.length * Math.PI * 2; return [r1(cx + rx * Math.cos(a)), r1(cy + ry * Math.sin(a)), 0.5]; });
+  } else {
+    // Lines snap to 0°/45°/90° relative to their other end point.
+    const q = s.points.length === 2 && !s.closed ? snapAngle(s.points[1 - d.idx], pt) : pt;
+    points = s.points.map((p, i) => i === d.idx ? [q[0], q[1], p[2]] : p);
+  }
+  d.page.elements = d.before.map(e => e.id === d.shapeId ? { ...e, points } : e);
+  queueRender(d.el);
+  renderShapeHandles();
+}
+
+// ---------- Pen gestures ----------
+const toShape = (s, r) => ({ ...s, shape: true, closed: r.closed, points: r.pts.map(([x, y]) => [r1(x), r1(y), 0.5]) });
+
+// "Zeichnen und Halten": holding the pen still for 0.5 s at the end of a stroke snaps it to a shape.
+function watchHold(d, e) {
+  const tool = d.stroke.tool;
+  if (!T.pen.drawHold || d.straight || d.shapes || !(tool === 'pen' || tool === 'highlighter')) return;
+  if (d.holdAt && Math.hypot(e.clientX - d.holdAt[0], e.clientY - d.holdAt[1]) < 4) return; // still holding
+  d.holdAt = [e.clientX, e.clientY];
+  clearTimeout(d.holdT);
+  d.holdT = setTimeout(() => {
+    if (drawing !== d || d.stroke.points.length < 6) return;
+    const r = recognize(d.stroke.points);
+    if (!r) return;
+    d.snapped = r;
+    clearInk(); pendingInk = 0;
+    inkTransform(d);
+    drawStroke(ictx, toShape(d.stroke, r));
+  }, 500);
+}
+
+// A scribble: many back-and-forth sweeps along its main axis, each spanning much of its extent.
+// Cursive handwriting reverses too, but in small loops, so it fails the sweep-length test.
+function isScribble(pts) {
+  if (pts.length < 12) return false;
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  const w = Math.max(...xs) - Math.min(...xs), hh = Math.max(...ys) - Math.min(...ys);
+  const ax = w >= hh ? 0 : 1, extent = Math.max(w, hh);
+  if (extent < 15) return false;
+  const turns = [pts[0][ax]];
+  let dir = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const dv = pts[i][ax] - pts[i - 1][ax];
+    if (Math.abs(dv) < 0.5) continue;
+    const s = Math.sign(dv);
+    if (dir && s !== dir) turns.push(pts[i - 1][ax]);
+    dir = s;
+  }
+  turns.push(pts[pts.length - 1][ax]);
+  if (turns.length < 6) return false; // at least 5 reversals
+  const sweeps = turns.slice(1).map((v, i) => Math.abs(v - turns[i])).sort((a, b) => a - b);
+  return sweeps[Math.floor(sweeps.length / 2)] >= extent * 0.45;
+}
+
+// Strokes touched by the scribble whose centre lies inside the scribble's area.
+function scribbleTargets(page, s) {
+  const b = bbox(s), pad = 10, hits = new Set();
+  const segs = s.points.slice(1).map((p, i) => [s.points[i], p]);
+  for (const e of page.elements) {
+    if (e.type !== 'stroke') continue;
+    if (!T.pen.scribbleAll && (e.shape || e.tool === 'highlighter')) continue;
+    const eb = bbox(e), c = [eb.x + eb.w / 2, eb.y + eb.h / 2];
+    if (c[0] < b.x - pad || c[0] > b.x + b.w + pad || c[1] < b.y - pad || c[1] > b.y + b.h + pad) continue;
+    if (segs.some(([a, z]) => strokeHit(e, a, z, e.width / 2 + 3))) hits.add(e.id);
+  }
+  return hits;
+}
+
+// After a closed loop around existing content, show "Auswählen" for a few seconds.
+let lassoHint = null;
+function removeLassoHint() { if (lassoHint) { clearTimeout(lassoHint.t); lassoHint.el.remove(); lassoHint = null; } }
+function offerCircleLasso(d, s) {
+  const p = s.points;
+  let len = 0;
+  for (let i = 1; i < p.length; i++) len += Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]);
+  if (len < 150 || Math.hypot(p[0][0] - p[p.length - 1][0], p[0][1] - p[p.length - 1][1]) > Math.max(25, len * 0.12)) return;
+  const ids = d.page.elements.filter(e => {
+    if (e.id === s.id || !selectable(e)) return false;
+    if (e.type === 'stroke') return e.points.filter(q => pointInPoly(q, p)).length >= Math.max(1, e.points.length * 0.7);
+    const eb = bbox(e);
+    return pointInPoly([eb.x + eb.w / 2, eb.y + eb.h / 2], p);
+  }).map(e => e.id);
+  if (!ids.length) return;
+  removeLassoHint();
+  const b = bbox(s), ph = pageH(d.page);
+  const el = h('button', {
+    class: 'lasso-hint', style: { left: (b.x + b.w / 2) / PAGE_W * 100 + '%', top: b.y / ph * 100 + '%' },
+    onclick: () => {
+      removeLassoHint();
+      // The loop was only a selection gesture: remove it, then select what it enclosed.
+      commit(d.page, d.page.elements.filter(e => e.id !== s.id));
+      selectTool('lasso');
+      selectIds(d.page, ids);
+    },
+  }, icon('lasso', 16), 'Auswählen');
+  d.el.append(el);
+  lassoHint = { el, t: setTimeout(removeLassoHint, 4000) };
 }
 
 function cancelDrawing() {
   const d = drawing; drawing = null; ed.busy = false;
   if (!d) return;
-  if (d.kind === 'erase' || d.kind === 'move' || d.kind === 'resize') { d.page.elements = d.before; renderEl(d.el); renderSelection(); }
+  clearTimeout(d.holdT);
+  if (d.kind === 'erase' || d.kind === 'move' || d.kind === 'resize' || d.kind === 'vertex') { d.page.elements = d.before; renderEl(d.el); renderSelection(); renderShapeHandles(); }
+  else if (d.kind === 'stroke') { if (!pendingInk) clearInk(); }
   else renderEl(d.el);
   drawOverlay();
 }
@@ -228,12 +476,25 @@ function finish(ok) {
   if (!ok) return cancelDrawing();
   drawing = null; ed.busy = false;
   if (d.kind === 'stroke') {
-    let s = d.stroke;
-    if (d.shapes) {
-      const r = recognize(s.points);
-      if (r) s = { ...s, shape: true, closed: r.closed, points: r.pts.map(([x, y]) => [r1(x), r1(y), 0.5]) };
+    clearTimeout(d.holdT);
+    let s = d.straight ? d.stroke : { ...d.stroke, points: finishPoints(d) };
+    const snap = d.snapped || (d.shapes && recognize(s.points));
+    if (snap) s = toShape(s, snap);
+    if (snap) clearInk(); // the snapped shape differs from the rough live stroke
+    // Pen gestures: scribble over something to erase it
+    if (!snap && s.tool === 'pen' && !d.shapes && T.pen.scribble && isScribble(s.points)) {
+      const victims = scribbleTargets(d.page, s);
+      if (victims.size) {
+        pendingInk++;
+        commit(d.page, d.page.elements.filter(e => !victims.has(e.id))).then(inkCommitted);
+        drawOverlay();
+        return;
+      }
     }
-    commit(d.page, [...d.page.elements, s]);
+    pendingInk++;
+    commit(d.page, [...d.page.elements, s]).then(inkCommitted);
+    // Pen gestures: circling something offers to select it
+    if (!snap && s.tool === 'pen' && !d.shapes && T.pen.circleLasso) offerCircleLasso(d, s);
   } else if (d.kind === 'erase') {
     d.page.elements = d.before;
     if (d.work !== d.before) commit(d.page, d.work);
@@ -245,8 +506,46 @@ function finish(ok) {
     finishLasso(d);
   } else if (d.kind === 'text') {
     textAt(d.el, d.pt);
+  } else if (d.kind === 'shot') {
+    screenshot(d);
+  } else if (d.kind === 'vertex') {
+    const next = d.page.elements;
+    d.page.elements = d.before;
+    if (next !== d.before) commit(d.page, next);
+    renderShapeHandles();
   }
   drawOverlay();
+}
+
+// ---------- Screenshot ----------
+// Drag a rectangle on a page (or tap for the whole page); the area is rendered from the
+// page data at high resolution, then offered for copying, sharing (iPad: "Bild sichern") or download.
+async function screenshot(d) {
+  const ph = pageH(d.page);
+  const a = toPage({ clientX: d.from[0], clientY: d.from[1] }, d.el, d.rect);
+  const b = toPage({ clientX: d.to[0], clientY: d.to[1] }, d.el, d.rect);
+  let x = Math.max(0, Math.min(a[0], b[0])), y = Math.max(0, Math.min(a[1], b[1]));
+  let w = Math.min(PAGE_W, Math.max(a[0], b[0])) - x, hh = Math.min(ph, Math.max(a[1], b[1])) - y;
+  if (w < 10 || hh < 10) { x = 0; y = 0; w = PAGE_W; hh = ph; } // tap → whole page
+  const s = 2.5;
+  const full = document.createElement('canvas');
+  full.width = Math.round(PAGE_W * s); full.height = Math.round(ph * s);
+  await renderPage(full.getContext('2d'), d.page, s);
+  const out = document.createElement('canvas');
+  out.width = Math.round(w * s); out.height = Math.round(hh * s);
+  out.getContext('2d').drawImage(full, x * s, y * s, w * s, hh * s, 0, 0, out.width, out.height);
+  const blob = await new Promise(res => out.toBlob(res, 'image/png'));
+  const name = `${(ed.doc.name || 'Notiz').replace(/[\\/:*?"<>|]/g, '_')} – Screenshot.png`;
+  const file = new File([blob], name, { type: 'image/png' });
+
+  const item = (label, ic, fn) => h('button', { class: 'menu-item', onclick: async () => { closePopover(); try { await fn(); } catch (err) { if (err.name !== 'AbortError') toast('Nicht möglich: ' + err.message, 3000); } } },
+    h('span', { class: 'menu-label' }, label), h('span', { class: 'menu-icon' }, icon(ic, 18)));
+  const preview = h('img', { class: 'shot-preview', src: URL.createObjectURL(blob), alt: 'Screenshot' });
+  popover({ x: d.to[0], y: d.to[1] }, h('div', { class: 'menu shot-menu' },
+    preview,
+    window.ClipboardItem ? item('Kopieren', 'copy', async () => { await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); toast('Screenshot kopiert'); }) : null,
+    navigator.canShare?.({ files: [file] }) ? item('Teilen / Bild sichern', 'share', () => navigator.share({ files: [file] })) : null,
+    item('Herunterladen', 'pdf', () => { const l = h('a', { href: preview.src, download: name }); l.click(); })));
 }
 
 // ---------- Gestures ----------
@@ -260,6 +559,28 @@ function gestureState() {
 function startGesture() { gesture = touches.size ? { ...gestureState(), zoom: ed.zoom } : null; }
 
 // ---------- Pen, highlighter, shapes ----------
+// Live strokes go onto the screen-sized #ink canvas at full device resolution.
+// Pen strokes are drawn incrementally (only the new pieces each frame), so the cost
+// per frame no longer depends on the page size or the stroke length. The finished
+// stroke is committed to the page canvas and the ink layer is cleared once that has rendered.
+let ink, ictx;
+let pendingInk = 0; // committed strokes still visible on the ink layer
+
+function sizeInk() {
+  const r = ink.parentElement.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  ink.width = Math.round(r.width * dpr); ink.height = Math.round(r.height * dpr);
+  ink._dpr = dpr;
+}
+function inkTransform(d) {
+  // page units → ink canvas pixels
+  const s = d.rect.width / PAGE_W * ink._dpr;
+  ictx.setTransform(s, 0, 0, s, (d.rect.left - d.stage.left) * ink._dpr, (d.rect.top - d.stage.top) * ink._dpr);
+}
+function clearInk() {
+  ictx.setTransform(1, 0, 0, 1, 0, 0);
+  ictx.clearRect(0, 0, ink.width, ink.height);
+}
+
 function startStroke(base, pt) {
   const cfg = T[ed.tool];
   const stroke = {
@@ -267,12 +588,16 @@ function startStroke(base, pt) {
     tool: ed.tool === 'highlighter' ? 'highlighter' : 'pen',
     pen: ed.tool === 'pen' ? cfg.pen : 'ball',
     color: cfg.colors[cfg.color], width: cfg.widths[cfg.width], points: [pt],
+    ...(ed.tool === 'pen' ? { sharp: cfg.sharp, press: cfg.press } : {}),
   };
-  // Snapshot of the page so the live stroke can be redrawn on top each frame.
-  const c = base.el._canvas, snap = document.createElement('canvas');
-  snap.width = c.width; snap.height = c.height;
-  if (c.width) snap.getContext('2d').drawImage(c, 0, 0);
-  drawing = { ...base, kind: 'stroke', stroke, snap, shapes: ed.tool === 'shapes', straight: ed.tool === 'highlighter' && cfg.straight };
+  drawing = {
+    ...base, kind: 'stroke', stroke, drawn: 1, prevMid: null,
+    smooth: ed.tool === 'pen' ? T.pen.stab : 0,
+    shapes: ed.tool === 'shapes', straight: ed.tool === 'highlighter' && cfg.straight,
+    // Whole-stroke redraw is needed where pieces can't simply be appended.
+    redraw: ed.tool !== 'pen',
+  };
+  if (!pendingInk) clearInk();
   drawLive();
 }
 let liveQueued = false;
@@ -284,15 +609,37 @@ function queueLive() {
 function drawLive() {
   const d = drawing;
   if (!d || d.kind !== 'stroke') return;
-  const c = d.el._canvas;
-  if (!c.width) return;
-  const ctx = c.getContext('2d');
-  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'copy';
-  ctx.drawImage(d.snap, 0, 0);
-  ctx.globalCompositeOperation = 'source-over';
-  const s = c.width / PAGE_W;
-  ctx.setTransform(s, 0, 0, s, 0, 0);
-  drawStroke(ctx, d.shapes ? { ...d.stroke, pen: 'ball' } : d.stroke);
+  inkTransform(d);
+  const s = d.stroke, p = s.points;
+  if (d.redraw) {
+    // Highlighter/shapes: redraw just this stroke on a cleared ink layer (cheap, the layer holds nothing else).
+    clearInk(); pendingInk = 0;
+    inkTransform(d);
+    drawStroke(ictx, d.shapes ? { ...s, pen: 'ball' } : s);
+    return;
+  }
+  ictx.lineCap = 'round'; ictx.lineJoin = 'round'; ictx.strokeStyle = s.color; ictx.fillStyle = s.color;
+  if (!d.prevMid) {
+    ictx.beginPath(); ictx.arc(p[0][0], p[0][1], pieceWidth(s, p[0][2]) / 2, 0, Math.PI * 2); ictx.fill();
+    d.prevMid = p[0];
+  }
+  // Same midpoint-quadratic pieces as drawStroke(), appended as points arrive.
+  for (let i = d.drawn; i < p.length - 1; i++) {
+    const m = [(p[i][0] + p[i + 1][0]) / 2, (p[i][1] + p[i + 1][1]) / 2];
+    ictx.lineWidth = pieceWidth(s, p[i][2], m[0] - d.prevMid[0], m[1] - d.prevMid[1]);
+    ictx.beginPath(); ictx.moveTo(d.prevMid[0], d.prevMid[1]); ictx.quadraticCurveTo(p[i][0], p[i][1], m[0], m[1]); ictx.stroke();
+    d.prevMid = m;
+  }
+  d.drawn = Math.max(d.drawn, p.length - 1);
+}
+
+// Called once the committed stroke is on the page canvas.
+function inkCommitted() {
+  pendingInk = Math.max(0, pendingInk - 1);
+  if (pendingInk) return;
+  clearInk();
+  const d = drawing;
+  if (d?.kind === 'stroke') { d.drawn = 1; d.prevMid = null; drawLive(); }
 }
 
 // ---------- Eraser ----------
@@ -550,6 +897,18 @@ function drawOverlay() {
     const last = laser[laser.length - 1];
     if (drawing?.kind === 'laser') { octx.globalAlpha = 1; octx.fillStyle = color; octx.beginPath(); octx.arc(last.x, last.y, 6, 0, Math.PI * 2); octx.fill(); }
     octx.restore();
+  }
+  // screenshot frame: dim everything outside the selected rectangle
+  if (drawing?.kind === 'shot') {
+    const [x0, y0] = drawing.from, [x1, y1] = drawing.to;
+    const x = Math.min(x0, x1) - r.left, y = Math.min(y0, y1) - r.top, w = Math.abs(x1 - x0), hh = Math.abs(y1 - y0);
+    if (w > 4 && hh > 4) {
+      octx.save();
+      octx.fillStyle = 'rgba(0,0,0,.28)';
+      octx.beginPath(); octx.rect(0, 0, r.width, r.height); octx.rect(x, y, w, hh); octx.fill('evenodd');
+      octx.setLineDash([6, 4]); octx.lineWidth = 1.5; octx.strokeStyle = '#fff'; octx.strokeRect(x, y, w, hh);
+      octx.restore();
+    }
   }
   // lasso path
   if (drawing?.kind === 'lasso' && drawing.path.length > 1) {
