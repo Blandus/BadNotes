@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Network first, so updates arrive as soon as you're online.
-const CACHE = 'notizen-v7';
+const CACHE = 'notizen-v8';
 const ASSETS = [
   './', 'index.html', 'style.css', 'manifest.json', 'favicon.png', 'logo.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png',
   'js/main.js', 'js/util.js', 'js/icons.js', 'js/store.js', 'js/render.js', 'js/ui.js',

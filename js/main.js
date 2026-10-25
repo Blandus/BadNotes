@@ -32,6 +32,15 @@ async function seed() {
   const welcome = newNotebook({ name: 'Willkommen', cover: COVERS[1], pages: [p1, p2] });
   const math = newNotebook({ name: 'Mathematik', cover: COVERS[6], template: 'grid', parent: uni.id });
   const cornell = newNotebook({ name: 'Vorlesungsnotizen', cover: COVERS[2], template: 'cornell', parent: uni.id });
+  // Fixed ids and an old edit time: every device creates the *same* sample records, so sync
+  // sees one record each (no duplicates), and any real edit or deletion elsewhere wins.
+  const SEED_TIME = Date.UTC(2025, 0, 1);
+  const ids = { [uni.id]: 'seed-ordner-uni', [welcome.id]: 'seed-willkommen', [math.id]: 'seed-mathematik', [cornell.id]: 'seed-vorlesungsnotizen' };
+  for (const r of [uni, welcome, math, cornell]) {
+    r.id = ids[r.id];
+    if (r.parent) r.parent = ids[r.parent];
+    r.created = r.updated = r.opened = SEED_TIME;
+  }
   await store.putMany([uni, welcome, math, cornell]);
   settings.seeded = true; saveSettings();
 }
