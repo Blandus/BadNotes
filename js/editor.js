@@ -43,31 +43,64 @@ export const PALETTE = ['#000000', '#4A4A4A', '#8E8E93', '#FFFFFF', '#1F4FD1', '
 
 // ---------- Editor state ----------
 export const ed = {
-  doc: null, tabs: settings.tabs || [], tool: settings.tool || 'pen', zoom: 1,
+  doc: null, tool: settings.tool || 'pen', zoom: 1,
+  // older versions stored tabs as plain document ids
+  tabs: (settings.tabs || []).map(t => (typeof t === 'string' ? { key: uid(), id: t, view: null } : t)),
+  tab: null,
   sel: null, editing: null, busy: false, pageEls: [], cur: 0,
-  hist: new Map(), views: new Map(),
+  hist: new Map(),
 };
+// restore the active tab key (older versions stored the document id instead)
+ed.tab = (ed.tabs.find(t => t.key === settings.activeTab) || ed.tabs.find(t => t.id === settings.activeTab))?.key || null;
 if (ed.tool === 'image') ed.tool = 'pen';
 export const sc = $('#scroller');
 const visible = new Set();
 const view = $('#editor');
 
-// ---------- Opening & closing documents ----------
-export async function openDoc(id) {
+// ---------- Tabs ----------
+// A tab is a view of a document: { key, id, view: { zoom, top, left, page } }. The same
+// document can be open in several tabs (e.g. exercise in one, solution further back in
+// another); they share the document itself, each keeps its own position.
+const tabOf = key => ed.tabs.find(t => t.key === key);
+const tabNames = new Map();
+function persistTabs() { settings.tabs = ed.tabs; settings.activeTab = view.hidden ? null : ed.tab; saveSettings(); }
+
+// Opens a document. Re-uses a tab already showing it unless newTab is set; page = page index to show.
+export async function openDoc(id, { newTab = false, page } = {}) {
+  let tab = !newTab && (ed.tabs.find(t => t.key === ed.tab && t.id === id) || ed.tabs.find(t => t.id === id));
+  if (!tab) {
+    saveView();
+    const cur = tabOf(ed.tab);
+    tab = { key: uid(), id, view: newTab && cur?.id === id ? { ...cur.view } : null };
+    const at = cur ? ed.tabs.indexOf(cur) + 1 : ed.tabs.length;
+    ed.tabs.splice(at, 0, tab);
+  }
+  return activateTab(tab.key, page);
+}
+
+export async function activateTab(key, page) {
+  const tab = tabOf(key);
+  if (!tab) return;
   await finishText();
   await flushSave();
-  if (ed.doc) saveView();
-  const doc = await store.get(id);
-  if (!doc || doc.deleted || doc.trashed) return toast('Dokument nicht gefunden');
-  if (!ed.tabs.includes(id)) ed.tabs.push(id);
-  settings.tabs = ed.tabs; settings.activeTab = id; saveSettings();
+  saveView();
+  const same = !view.hidden && ed.doc?.id === tab.id;
+  const doc = same ? ed.doc : await store.get(tab.id);
+  if (!doc || doc.deleted || doc.trashed) {
+    ed.tabs = ed.tabs.filter(t => t.id !== tab.id); persistTabs();
+    return toast('Dokument nicht gefunden');
+  }
+  ed.tab = key;
   $('#library').hidden = true; view.hidden = false;
-  doc.opened = Date.now();
-  store.put(doc);
-  ed.doc = doc;
+  persistTabs();
+  if (!same) {
+    doc.opened = Date.now();
+    store.put(doc);
+    ed.doc = doc;
+    buildPages();
+  }
   clearSelection();
-  buildPages();
-  restoreView();
+  restoreView(tab, page);
   renderTabs(); renderThumbs(); updateChrome(); renderOptions();
 }
 
@@ -75,50 +108,75 @@ export async function showLibrary() {
   await finishText();
   await flushSave();
   saveView();
-  settings.activeTab = null; saveSettings();
   ed.doc = null;
   clearSelection(); closePopover();
   observer.disconnect(); visible.clear();
   $('#pages').replaceChildren();
   view.hidden = true; $('#library').hidden = false;
+  persistTabs();
   renderLibrary();
 }
 
-function closeTab(id) {
-  ed.tabs = ed.tabs.filter(t => t !== id);
-  settings.tabs = ed.tabs; saveSettings();
-  if (ed.doc?.id === id) { const next = ed.tabs[ed.tabs.length - 1]; next ? openDoc(next) : showLibrary(); }
-  else renderTabs();
+function closeTab(key) {
+  const i = ed.tabs.findIndex(t => t.key === key);
+  if (i < 0) return;
+  ed.tabs.splice(i, 1);
+  persistTabs();
+  if (key === ed.tab) {
+    const next = ed.tabs[i] || ed.tabs[i - 1];
+    next ? activateTab(next.key) : showLibrary();
+  } else renderTabs();
 }
+const closeDocTabs = id => { for (const t of ed.tabs.filter(t => t.id === id)) closeTab(t.key); };
 
-function saveView() { if (ed.doc) ed.views.set(ed.doc.id, { zoom: ed.zoom, top: sc.scrollTop, left: sc.scrollLeft }); }
-function restoreView() {
-  const v = ed.views.get(ed.doc.id) || { zoom: 1, top: 0, left: 0 };
+function saveView() {
+  const t = tabOf(ed.tab);
+  if (!t || !ed.doc || t.id !== ed.doc.id || view.hidden) return;
+  t.view = { zoom: ed.zoom, top: sc.scrollTop, left: sc.scrollLeft, page: ed.cur };
+  persistTabs();
+}
+function restoreView(tab, page) {
+  const v = tab.view || { zoom: 1, top: 0, left: 0 };
   ed.zoom = v.zoom; applyZoom(); updateZoomLabel();
   sc.scrollTop = v.top; sc.scrollLeft = v.left;
+  if (page != null) scrollToPage(page);
+  hideDetails();
   updateCurrent();
 }
 
 async function renderTabs() {
-  const recs = await Promise.all(ed.tabs.map(id => store.get(id)));
-  ed.tabs = ed.tabs.filter((id, i) => recs[i] && !recs[i].deleted && !recs[i].trashed);
-  const tabs = ed.tabs.map(id => {
-    const name = id === ed.doc?.id ? ed.doc.name : recs.find(r => r?.id === id).name;
-    return h('div', { class: 'tab' + (id === ed.doc?.id ? ' active' : '') },
-      h('button', { class: 'tab-title', title: name, onclick: () => id !== ed.doc?.id && openDoc(id) }, name),
-      h('button', { class: 'tab-close', title: 'Tab schließen', onclick: () => closeTab(id) }, icon('close', 14)));
-  });
-  $('#tabs').replaceChildren(...tabs);
-  // Tabs only appear once more than one document is open (the web app has none).
+  for (const id of new Set(ed.tabs.map(t => t.id))) {
+    if (id === ed.doc?.id) { tabNames.set(id, ed.doc.name); continue; }
+    const r = await store.get(id);
+    if (!r || r.deleted || r.trashed) ed.tabs = ed.tabs.filter(t => t.id !== id);
+    else tabNames.set(id, r.name);
+  }
+  $('#tabs').replaceChildren(...ed.tabs.map(t => h('div', { class: 'tab' + (t.key === ed.tab ? ' active' : ''), 'data-key': t.key },
+    h('button', { class: 'tab-title', onclick: () => t.key !== ed.tab && activateTab(t.key) }),
+    h('button', { class: 'tab-close', title: 'Tab schließen', onclick: () => closeTab(t.key) }, icon('close', 14)))));
+  updateTabLabels();
+  // Tabs only appear once more than one tab is open (the web app has none).
   $('#tabbar').hidden = ed.tabs.length < 2;
   if (ed.doc) $('#docTitleText').textContent = ed.doc.name;
+}
+// Tab titles; when a document is open in several tabs, each shows its page number.
+function updateTabLabels() {
+  for (const el of document.querySelectorAll('#tabs .tab')) {
+    const t = tabOf(el.dataset.key);
+    if (!t) continue;
+    const name = tabNames.get(t.id) || '';
+    const page = (t.key === ed.tab ? ed.cur : t.view?.page ?? 0) + 1;
+    const label = ed.tabs.filter(x => x.id === t.id).length > 1 ? `${name} · S. ${page}` : name;
+    const btn = el.querySelector('.tab-title');
+    if (btn.textContent !== label) { btn.textContent = label; btn.title = label; }
+  }
 }
 
 // Remote (sync) updates to the open document
 bus.addEventListener('remote', async e => {
   if (!ed.doc || e.detail !== ed.doc.id) return;
   const doc = await store.get(ed.doc.id);
-  if (!doc || doc.deleted || doc.trashed) return closeTab(e.detail);
+  if (!doc || doc.deleted || doc.trashed) return closeDocTabs(e.detail);
   const top = sc.scrollTop;
   ed.doc = doc; ed.hist.delete(doc.id);
   clearSelection();
@@ -307,7 +365,7 @@ function updateCurrent() {
     const d = probe < r.top ? r.top - probe : probe > r.bottom ? probe - r.bottom : 0;
     if (d < bestD) { bestD = d; best = i; }
   });
-  if (best !== ed.cur) { ed.cur = best; highlightThumb(); }
+  if (best !== ed.cur) { ed.cur = best; highlightThumb(); updateTabLabels(); }
   updateBookmarkBtn();
   $('#pageInd').textContent = `${ed.cur + 1} von ${ed.doc.pages.length}`;
 }
@@ -438,6 +496,7 @@ function scheduleThumb(page) {
 function pageMenu(i, anchor) {
   const p = ed.doc.pages[i];
   menu(anchor, [
+    { label: 'In neuem Tab öffnen', icon: 'copy', action: () => openDoc(ed.doc.id, { newTab: true, page: i }) },
     { label: p.bookmark ? 'Lesezeichen entfernen' : 'Lesezeichen setzen', icon: p.bookmark ? 'bookmarkFill' : 'bookmark', action: () => toggleBookmark(i) },
     { label: 'Seite duplizieren', icon: 'copy', action: () => duplicatePage(i) },
     { label: 'Papiervorlage ändern', icon: 'doc', action: () => changeTemplate(i) },
@@ -488,6 +547,8 @@ function exportMenu(anchor) {
     { label: 'Dokument als PDF', icon: 'pdf', action: () => exportPdf(ed.doc) },
     { label: 'Aktuelle Seite als PDF', icon: 'doc', action: () => exportPdf(ed.doc, [currentPage()]) },
     { label: 'Aktuelle Seite als Bild', icon: 'image', action: () => exportPng(ed.doc, currentPage(), ed.cur) },
+    '-',
+    { label: 'Als Goodnotes-Datei (Beta)', icon: 'doc', action: async () => { await flushSave(); (await import('./goodnotes-export.js')).exportGoodnotes(ed.doc); } },
   ]);
 }
 
@@ -497,6 +558,7 @@ function buildToolbar() {
     h('button', {
       class: 'doc-title', id: 'docTitle', title: 'Dokument',
       onclick: e => menu(e.currentTarget, [
+        { label: 'In neuem Tab öffnen', icon: 'copy', action: () => openDoc(ed.doc.id, { newTab: true }) },
         { label: 'Umbenennen', icon: 'rename', action: renameDoc },
         { label: 'Papiervorlage ändern', icon: 'doc', action: () => changeTemplate() },
         { label: 'Exportieren', icon: 'share', action: () => exportMenu($('#btnShare')) },

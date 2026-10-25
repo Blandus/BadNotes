@@ -1,5 +1,5 @@
 // Google Drive sync. Every record (notebook or folder) is stored as <id>.json in a
-// "Notizen-App" folder; per record the newer version (by `updated`) wins.
+// "BadNotes" folder (formerly "Notizen-App"); per record the newer version (by `updated`) wins.
 import { store, settings, saveSettings, emit } from './store.js';
 import { uid } from './util.js';
 
@@ -51,15 +51,16 @@ const enc = encodeURIComponent;
 const rUpd = f => +(f?.appProperties?.updated || 0);
 const recId = f => f.name.replace(/\.json$/, '');
 
-// All "Notizen-App" folders, oldest first (two devices may each have created one on first sync).
+// All app folders ("BadNotes" / old "Notizen-App"), oldest first (two devices may each have created one on first sync).
 // The oldest is where new files go; files in all of them are read.
 async function findFolders() {
-  const q = "name='Notizen-App' and mimeType='application/vnd.google-apps.folder' and trashed=false";
+  // "Notizen-App" is the folder name used before the app was called BadNotes; it stays readable.
+  const q = "(name='BadNotes' or name='Notizen-App') and mimeType='application/vnd.google-apps.folder' and trashed=false";
   const r = await (await gapi(`files?q=${enc(q)}&orderBy=createdTime&fields=files(id,createdTime)`)).json();
   if (r.files.length) return r.files.map(f => f.id);
   const f = await (await gapi('files?fields=id', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: 'Notizen-App', mimeType: 'application/vnd.google-apps.folder' }),
+    body: JSON.stringify({ name: 'BadNotes', mimeType: 'application/vnd.google-apps.folder' }),
   })).json();
   return [f.id];
 }

@@ -3,7 +3,7 @@ import { store, settings, saveSettings, bus, newNotebook, newFolder, newPage, CO
 import { renderLibrary, applyTheme, importPdfFile, importFromClipboard } from './library.js';
 import { h } from './util.js';
 import { icon } from './icons.js';
-import { initEditor, openDoc, flushSave, isLocked, ed } from './editor.js';
+import { initEditor, activateTab, flushSave, isLocked, ed } from './editor.js';
 import { initTools } from './tools.js';
 import { configureSync, scheduleSync } from './sync.js';
 
@@ -46,7 +46,7 @@ async function seed() {
 }
 
 // Drag a PDF from Files (or the desktop) onto the app to import it.
-const isPdf = f => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+const isPdf = f => f.type === 'application/pdf' || /\.(pdf|goodnotes)$/i.test(f.name);
 document.addEventListener('dragover', e => { if ([...e.dataTransfer.items].some(i => i.kind === 'file')) e.preventDefault(); });
 document.addEventListener('drop', e => {
   const pdfs = [...e.dataTransfer.files].filter(isPdf);
@@ -55,7 +55,7 @@ document.addEventListener('drop', e => {
   importPdfFile(pdfs[0]);
 });
 
-// After the shortcut "In Notizen öffnen" has been used once, coming back to the app shows a
+// After the shortcut "In BadNotes öffnen" has been used once, coming back to the app shows a
 // one-tap import button for a few seconds (reading the clipboard needs a tap on iOS).
 let clipHint = null;
 function offerClipboardImport() {
@@ -77,7 +77,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   configureSync({ beforeSync: flushSave, isLocked });
   bus.addEventListener('change', scheduleSync);
   await seed();
-  if (settings.activeTab && ed.tabs.includes(settings.activeTab)) openDoc(settings.activeTab);
+  if (ed.tab && settings.activeTab) activateTab(ed.tab);
   else renderLibrary();
   offerClipboardImport();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});

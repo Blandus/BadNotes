@@ -81,7 +81,7 @@ function renderSidebar() {
     onclick: () => go(key),
   }, icon(s.icon, 24), h('span', {}, s.label));
   sb.replaceChildren(
-    h('div', { class: 'sb-head' }, h('img', { src: 'logo.png', alt: '', width: 32, height: 32 }), h('span', {}, 'Notizen')),
+    h('div', { class: 'sb-head' }, h('img', { src: 'logo.png', alt: '', width: 32, height: 32 }), h('span', {}, 'BadNotes')),
     h('nav', { class: 'sb-nav' },
       item('docs', SECTIONS.docs),
       ...folders.map(f => h('button', {
@@ -332,6 +332,7 @@ function newMenu(anchor) {
     { label: 'Ordner', icon: 'folder', action: createFolder },
     '-',
     { label: 'PDF importieren', icon: 'pdf', action: importPdf },
+    { label: 'Goodnotes importieren', icon: 'doc', action: importGoodnotes },
     { label: 'PDF aus Zwischenablage', icon: 'paste', action: importFromClipboard },
     { label: 'Bild importieren', icon: 'image', action: importImage },
   ]);
@@ -354,6 +355,7 @@ function itemMenu(r, anchor) {
     { label: r.favorite ? 'Aus Favoriten entfernen' : 'Zu Favoriten', icon: r.favorite ? 'starFill' : 'star', action: () => update(r, { favorite: !r.favorite }) },
     nb && { label: 'Cover ändern', icon: 'palette', action: () => changeCover(r) },
     nb && { label: 'Als PDF exportieren', icon: 'share', action: () => exportPdf(r) },
+    nb && { label: 'Als Goodnotes-Datei (Beta)', icon: 'doc', action: async () => (await import('./goodnotes-export.js')).exportGoodnotes(r) },
     '-',
     { label: 'In Papierkorb', icon: 'trash', danger: true, action: () => trash([r.id]) },
   ]);
@@ -600,24 +602,48 @@ async function importPdf() {
   if (f) importPdfFile(f);
 }
 
-// Shared PDF import (file picker, drag & drop, clipboard): ask where to save, then convert and open.
+async function importGoodnotes() {
+  // No accept filter: iOS doesn't know the .goodnotes type and would grey the files out.
+  const f = await pickFile('');
+  if (!f) return;
+  if (!(await isGoodnotes(f))) return toast('Das ist keine .goodnotes-Datei', 3000);
+  importPdfFile(f);
+}
+
+// .goodnotes files are ZIP archives ("PK")
+export async function isGoodnotes(file) {
+  if (/\.goodnotes$/i.test(file.name || '')) return true;
+  const head = new Uint8Array(await file.slice(0, 2).arrayBuffer());
+  return head[0] === 0x50 && head[1] === 0x4b;
+}
+
+// Shared import (file picker, drag & drop, clipboard) for PDFs and Goodnotes documents:
+// ask where to save, then convert and open.
 export async function importPdfFile(file, name = file.name) {
-  const title = (name || 'Importiertes PDF').replace(/\.pdf$/i, '');
+  const gn = await isGoodnotes(file);
+  let title = (name || (gn ? 'Goodnotes-Import' : 'Importiertes PDF')).replace(/\.(pdf|goodnotes)$/i, '');
   const parent = await pickFolder(`„${title}“ speichern in`, 'Speichern', { preselect: lib.section === 'docs' ? lib.folder : null });
   if (parent === undefined) return;
   try {
-    const nb = newNotebook({ name: title, parent, pages: await pdfToPages(file) });
+    let pages;
+    if (gn) {
+      const { goodnotesToNotebook } = await import('./goodnotes.js');
+      const doc = await goodnotesToNotebook(file);
+      pages = doc.pages;
+      if (doc.name) title = doc.name;
+    } else pages = await pdfToPages(file);
+    const nb = newNotebook({ name: title, parent, pages });
     await store.put(nb);
     openDoc(nb.id);
-  } catch (err) { toast('Import fehlgeschlagen: ' + err.message, 5000); }
+  } catch (err) { toast('Import fehlgeschlagen: ' + err.message, 6000); }
 }
 
 // Clipboard import. Two kinds of content are understood:
 // - a copied PDF *file* (e.g. Goodnotes "Exportieren → Kopieren", Files "Kopieren")
-// - text from the iOS shortcut "In Notizen öffnen": "NOTIZEN-PDF|<file name>|<base64>" (or plain base64)
+// - text from the iOS shortcut "In BadNotes öffnen": "NOTIZEN-PDF|<file name>|<base64>" (or plain base64)
 // Safari's clipboard API only hands out text and images, so for files we fall back to a paste
 // field: the system "Einfügen" (long press / Cmd+V) does deliver copied files to the page.
-const looksLikePdf = f => f && (f.type === 'application/pdf' || /\.pdf$/i.test(f.name || ''));
+const looksLikePdf = f => f && (f.type === 'application/pdf' || /\.(pdf|goodnotes)$/i.test(f.name || ''));
 
 async function pdfFromText(text) {
   let name = 'Importiertes PDF', b64 = (text || '').trim();
@@ -712,7 +738,7 @@ export async function openSettings() {
     h('div', { class: 'form-label' }, 'Google-Drive-Synchronisation'),
     clientId,
     h('div', { class: 'hint' }, 'OAuth-Client-ID aus der Google Cloud Console (siehe README).'),
-    h('div', { class: 'hint', style: { marginTop: '14px', textAlign: 'center' } }, `Notizen · Version ${APP_VERSION}`));
+    h('div', { class: 'hint', style: { marginTop: '14px', textAlign: 'center' } }, `BadNotes · Version ${APP_VERSION}`));
   const ok = await sheet({ title: 'Einstellungen', body });
   if (ok) { settings.clientId = clientId.value.trim(); saveSettings(); renderSidebar(); }
 }

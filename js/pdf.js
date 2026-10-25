@@ -70,7 +70,7 @@ export async function loadImageFile(file, max = 1600) {
   return { src: c.toDataURL(png ? 'image/png' : 'image/jpeg', 0.88), w: c.width, h: c.height };
 }
 
-const safeName = n => (n || 'Notizen').replace(/[\\/:*?"<>|]/g, '_');
+const safeName = n => (n || 'BadNotes').replace(/[\\/:*?"<>|]/g, '_');
 
 export async function exportPdf(doc, pages = doc.pages) {
   const { jsPDF } = window.jspdf || {};
