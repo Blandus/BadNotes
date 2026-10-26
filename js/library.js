@@ -287,7 +287,12 @@ function renderContent() {
   for (const r of list) wrap.append(lib.view === 'grid' ? tile(r) : row(r));
   const empty = !list.length && h('div', { class: 'empty' },
     lib.query ? 'Keine Treffer.' : lib.section === 'trash' ? 'Der Papierkorb ist leer.' : lib.section === 'favorites' ? 'Noch keine Favoriten. Markiere Dokumente über das ···-Menü.' : lib.section === 'recent' ? 'Noch keine Dokumente geöffnet.' : 'Hier ist noch nichts. Tippe oben auf +.');
-  content.replaceChildren(list.length ? wrap : '', empty || '');
+  // The editable background lets iPadOS offer its real 'Einsetzen' callout on empty space.
+  // Cards stay non-editable and keep their own pointer and context-menu handling.
+  content.classList.add('library-paste-enabled');
+  wrap.setAttribute('contenteditable', 'false');
+  if (empty) empty.setAttribute('contenteditable', 'false');
+  content.replaceChildren(clipboardArea('library-paste-space', message => pasteSheet(message)), list.length ? wrap : '', empty || '');
 }
 
 function activate(r) {
@@ -436,7 +441,8 @@ function newMenu(anchor) {
     '-',
     { label: 'PDF importieren', icon: 'pdf', action: importPdf },
     { label: 'Goodnotes importieren', icon: 'doc', action: importGoodnotes },
-    { label: 'PDF aus Zwischenablage', icon: 'paste', action: importFromClipboard },
+    { label: 'Goodnotes-Ordner (ZIP) importieren', icon: 'folder', action: importGoodnotes },
+    { label: 'PDF/Goodnotes aus Zwischenablage', icon: 'paste', action: importFromClipboard },
     { label: 'Bild importieren', icon: 'image', action: importImage },
   ]);
 }
@@ -760,7 +766,7 @@ async function importGoodnotes() {
   // No accept filter: iOS doesn't know the .goodnotes type and would grey the files out.
   const f = await pickFile('');
   if (!f) return;
-  if (!(await isGoodnotes(f))) return toast('Das ist keine .goodnotes-Datei', 3000);
+  if (!(await isGoodnotes(f))) return toast('Das ist keine .goodnotes-Datei und kein Goodnotes-Ordner (ZIP)', 3000);
   importPdfFile(f);
 }
 
@@ -779,7 +785,7 @@ export async function importPdfFile(file, name = file.name) {
     try {
       const { unzip } = await import('./goodnotes.js');
       const zip = await unzip(await file.arrayBuffer());
-      if (!zip.has('index.events.pb') && [...zip.keys()].some(k => /\.goodnotes$/i.test(k))) return importGoodnotesFolder(file, zip);
+      if (!zip.has('index.events.pb') && [...zip.keys()].some(k => ZIP_DOC.test(k))) return importGoodnotesFolder(file, zip);
     } catch { /* not readable as ZIP: the document import below reports it */ }
   }
   let title = (name || (gn ? 'Goodnotes-Import' : 'Importiertes PDF')).replace(/\.(pdf|goodnotes)$/i, '');
@@ -807,21 +813,24 @@ export async function importPdfFile(file, name = file.name) {
 // ---------- Goodnotes folder export (ZIP) ----------
 // Goodnotes exports a folder as a ZIP: "<Folder>/<Sub>/<Doc>.goodnotes" entries plus
 // ".goodnotesmeta" (JSON: items [{ path, color, symbol }] for the folders). The folder tree is
-// rebuilt as real Folio folders; each document goes through the normal .goodnotes import.
+// rebuilt as real Folio folders; each document goes through the normal .goodnotes import, PDFs
+// in the ZIP through the normal PDF import (so any zipped folder of PDFs works too).
 // Nothing is overwritten: folders that already exist can be merged into, documents with a name
 // that already exists there get a number; everything not imported is listed at the end.
+const ZIP_DOC = /^(?!__MACOSX\/).*\.(goodnotes|pdf)$/i;
 const GN_COLORS = { blue: '#3E6E9F', lightBlue: '#8EB8E6', teal: '#8EB8E6', green: '#4F7A66', mint: '#6B8F7E', yellow: '#C9A35B', orange: '#B8A68A', brown: '#B8A68A', purple: '#7D6B91', pink: '#7D6B91', red: '#7D6B91', gray: '#A7B4C6', grey: '#A7B4C6', black: '#3A3F4A' };
 async function importGoodnotesFolder(file, zip) {
   const entries = [...zip.keys()];
-  const docs = entries.filter(k => /\.goodnotes$/i.test(k) && !k.startsWith('__MACOSX/'));
+  const docs = entries.filter(k => ZIP_DOC.test(k));
   const skipped = entries.filter(k => !docs.includes(k) && !k.endsWith('/') && k !== '.goodnotesmeta' && !/(^|\/)(\.DS_Store|__MACOSX\/.*)$/.test(k))
-    .map(k => [k, 'kein Goodnotes-Dokument']);
+    .map(k => [k, 'weder Goodnotes-Dokument noch PDF']);
   let meta = {};
   try { if (zip.has('.goodnotesmeta')) for (const it of JSON.parse(new TextDecoder().decode(await zip.get('.goodnotesmeta')())).items || []) meta[it.path] = it; } catch {}
   const dirOf = k => k.split('/').slice(0, -1).join('/');
   const paths = [...new Set([...Object.keys(meta), ...docs.map(dirOf).filter(Boolean)].flatMap(p => p.split('/').map((_, i, a) => a.slice(0, i + 1).join('/'))))].sort();
   const roots = [...new Set(paths.map(p => p.split('/')[0]))];
-  const label = roots.length === 1 ? `„${roots[0]}“` : `${roots.length} Ordner`;
+  // documents at the top of the ZIP (no folder) go straight into the chosen target folder
+  const label = roots.length === 1 && docs.every(k => dirOf(k)) ? `„${roots[0]}“` : roots.length ? `${roots.length} Ordner` : `${docs.length} Dokument${docs.length === 1 ? '' : 'e'}`;
 
   const parent = await pickFolder(`${label} importieren nach`, 'Weiter', { preselect: lib.section === 'docs' ? lib.folder : null });
   if (parent === undefined) return;
@@ -836,7 +845,7 @@ async function importGoodnotesFolder(file, zip) {
       h('p', { class: 'cal-hint' }, `Am Ziel gibt es schon: ${clashes.map(n => `„${n}“`).join(', ')}.`),
       segmented([['merge', 'Zusammenlegen'], ['new', 'Neuer Ordner']], mode, v => { mode = v; }),
       h('p', { class: 'cal-hint' }, 'Zusammenlegen: Dokumente kommen in den vorhandenen Ordner; gleichnamige werden nummeriert, nichts wird überschrieben.')) : null);
-  if (!(await sheet({ title: 'Goodnotes-Ordner importieren', body: summary, done: 'Importieren' }))) return;
+  if (!(await sheet({ title: 'Ordner importieren', body: summary, done: 'Importieren' }))) return;
 
   const { goodnotesToNotebook } = await import('./goodnotes.js');
   const folderIds = new Map(); // zip path → Folio folder id
@@ -860,12 +869,15 @@ async function importGoodnotesFolder(file, zip) {
     let i = 0;
     for (const k of docs) {
       i++;
-      const base = k.split('/').pop().replace(/\.goodnotes$/i, '');
+      const isPdfEntry = /\.pdf$/i.test(k);
+      const base = k.split('/').pop().replace(/\.(goodnotes|pdf)$/i, '');
       toast(`Importiere ${i}/${docs.length}: ${base}…`, 0);
       const par = folderIds.get(dirOf(k)) ?? parent;
       try {
         const bytes = await zip.get(k)();
-        const doc = await goodnotesToNotebook(new File([bytes], base + '.goodnotes'));
+        const doc = isPdfEntry
+          ? { pages: await pdfToPages(new File([bytes], base + '.pdf', { type: 'application/pdf' })) }
+          : await goodnotesToNotebook(new File([bytes], base + '.goodnotes'));
         const want = doc.name || base;
         const kind = doc.blocks ? 'textdoc' : 'notebook';
         const name = uniqueName(want, par, kind);
@@ -890,74 +902,177 @@ async function importGoodnotesFolder(file, zip) {
   renderLibrary();
 }
 
-// Clipboard import. Two kinds of content are understood:
-// - a copied PDF *file* (e.g. Goodnotes "Exportieren → Kopieren", Files "Kopieren")
-// - text from the iOS shortcut "In Folio öffnen": "NOTIZEN-PDF|<file name>|<base64>" (or plain base64)
-// Safari's clipboard API only hands out text and images, so for files we fall back to a paste
-// field: the system "Einfügen" (long press / Cmd+V) does deliver copied files to the page.
-const looksLikePdf = f => f && (f.type === 'application/pdf' || /\.(pdf|goodnotes)$/i.test(f.name || ''));
-
-async function pdfFromText(text) {
-  let name = 'Importiertes PDF', b64 = (text || '').trim();
-  const m = b64.match(/^NOTIZEN-PDF\|([^|]*)\|([\s\S]+)$/);
-  if (m) { name = m[1] || name; b64 = m[2]; }
-  b64 = b64.replace(/\s+/g, '');
-  if (!b64.startsWith('JVBER')) return null; // "%PDF" in base64
-  return { blob: await (await fetch('data:application/pdf;base64,' + b64)).blob(), name };
+// Clipboard payloads are decoded locally. Never fetch copied URLs or upload clipboard data.
+async function documentKind(blob) {
+  if (!blob?.size) return null;
+  const bytes = new Uint8Array(await blob.slice(0, 1024).arrayBuffer());
+  const head = String.fromCharCode(...bytes);
+  if (bytes[0] === 0x50 && bytes[1] === 0x4b &&
+      ((bytes[2] === 3 && bytes[3] === 4) || (bytes[2] === 5 && bytes[3] === 6))) return 'goodnotes';
+  if (head.includes('%PDF-')) return 'pdf';
+  return null;
 }
 
-async function pdfFromClipboardAPI() {
-  try {
-    for (const item of await navigator.clipboard.read()) {
-      if (item.types.includes('application/pdf')) return { blob: await item.getType('application/pdf'), name: 'Eingefügtes PDF' };
-      if (item.types.includes('text/plain')) {
-        const r = await pdfFromText(await (await item.getType('text/plain')).text());
-        if (r) return r;
-      }
+async function documentFromBlob(blob, name = blob?.name || '') {
+  const kind = await documentKind(blob);
+  if (!kind) return null;
+  name = String(name || '').trim().split(/[\\/]/).pop();
+  if (!name || /^(image|datei|file|blob)(\.[^.]+)?$/i.test(name)) {
+    name = kind === 'pdf' ? 'Eingefügtes PDF.pdf' : 'Eingefügtes Goodnotes.goodnotes';
+  } else if (kind === 'pdf' && !/\.pdf$/i.test(name)) name += '.pdf';
+  else if (kind === 'goodnotes' && !/\.(goodnotes|zip)$/i.test(name)) name += '.goodnotes';
+  return new File([blob], name, { type: kind === 'pdf' ? 'application/pdf' : 'application/zip' });
+}
+
+// New shortcuts use FOLIO-FILE|<name>|<base64>. Existing NOTIZEN-PDF shortcuts still work.
+// Also accept data URLs and plain base64 for either supported file type.
+async function documentFromText(text) {
+  let data = String(text || '').trim(), name = '';
+  const prefix = /^(?:FOLIO-(?:FILE|PDF|GOODNOTES)|NOTIZEN-PDF)\|/i.exec(data);
+  if (prefix) {
+    data = data.slice(prefix[0].length);
+    const divider = data.lastIndexOf('|');
+    if (divider < 0) throw new Error('Die kopierten Dateidaten sind unvollständig.');
+    name = data.slice(0, divider);
+    data = data.slice(divider + 1);
+  }
+  const url = /^data:[^,]*;base64,/i.exec(data);
+  if (url) data = data.slice(url[0].length);
+  data = data.replace(/\s+/g, '');
+  if (!prefix && !url && !/^(JVBER|UEs)/.test(data)) return null;
+  let binary;
+  try { binary = atob(data); }
+  catch { throw new Error('Die kopierten Dateidaten sind keine gültige Base64-Datei.'); }
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const file = await documentFromBlob(new Blob([bytes]), name);
+  if (!file && (prefix || url)) throw new Error('Die kopierten Daten enthalten keine PDF- oder Goodnotes-Datei.');
+  return file;
+}
+
+// DataTransfer can become unreadable once the event handler awaits: capture all data first.
+function snapshotPaste(data) {
+  const files = [];
+  for (const item of Array.from(data?.items || [])) {
+    if (item.kind !== 'file') continue;
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  for (const file of Array.from(data?.files || [])) if (!files.includes(file)) files.push(file);
+  const texts = ['text/plain', 'text/uri-list'].map(type => data?.getData(type) || '').filter(Boolean);
+  return { files, texts };
+}
+
+async function documentFromPaste({ files = [], texts = [] }) {
+  // Prefer an actual file over alternate text/preview representations of the same clipboard.
+  for (const blob of files) {
+    const file = await documentFromBlob(blob);
+    if (file) return file;
+  }
+  for (const text of texts) {
+    const file = await documentFromText(text);
+    if (file) return file;
+  }
+  return null;
+}
+
+async function readClipboardDocument() {
+  if (navigator.clipboard?.read) {
+    const items = await navigator.clipboard.read();
+    // Try file representations across all items before inspecting encoded text.
+    for (const item of items) for (const type of item.types) {
+      if (!/pdf|goodnotes|zip|octet-stream/i.test(type)) continue;
+      try {
+        const file = await documentFromBlob(await item.getType(type));
+        if (file) return file;
+      } catch { /* another advertised representation may be usable */ }
     }
-  } catch {}
-  try { return await pdfFromText(await navigator.clipboard.readText()); } catch { return null; }
+    for (const item of items) if (item.types.includes('text/plain')) {
+      const file = await documentFromText(await (await item.getType('text/plain')).text());
+      if (file) return file;
+    }
+    return null;
+  }
+  if (navigator.clipboard?.readText) return documentFromText(await navigator.clipboard.readText());
+  return null;
 }
 
-function gotPdf({ blob, name }) {
-  if (!settings.clipImport) { settings.clipImport = true; saveSettings(); } // from now on offer it when the app is opened
-  importPdfFile(blob, name);
+// Clipboard import: files exposed by iPadOS, or locally decoded shortcut/base64 data.
+// Reading a clipboard is always triggered by a paste or an explicit button press.
+let clipboardImporting = false;
+const CLIPBOARD_HELP = 'Safari hat keine PDF- oder Goodnotes-Datei übergeben. Kopiere in Goodnotes einen Export als PDF oder Goodnotes – einzelne kopierte Striche oder Vorschaubilder sind kein vollständiges Dokument.';
+
+async function importClipboard(read, onFailure, beforeImport) {
+  if (clipboardImporting) return;
+  clipboardImporting = true;
+  try {
+    const file = await read();
+    if (!file) return onFailure(CLIPBOARD_HELP);
+    if (beforeImport && beforeImport() === false) return;
+    document.querySelector('.clip-hint')?.remove();
+    settings.clipImport = true; saveSettings();
+    await importPdfFile(file);
+  } catch (err) {
+    onFailure(err.name === 'NotAllowedError' ? 'Bitte im Einfügebereich lange drücken und „Einsetzen“ wählen.' : 'Einfügen fehlgeschlagen: ' + err.message);
+  } finally { clipboardImporting = false; }
 }
 
-export async function importFromClipboard() {
-  const direct = await pdfFromClipboardAPI();
-  if (direct) return gotPdf(direct);
-  pasteSheet();
-}
-
-// Paste field: tap it, then "Einfügen" from the iOS menu (or Cmd/Ctrl+V).
-function pasteSheet() {
+function clipboardArea(className, onFailure, beforeImport) {
   const zone = h('div', {
-    class: 'paste-zone', contenteditable: 'true', role: 'textbox', 'aria-label': 'Hier einfügen',
-    'data-placeholder': 'Hier tippen und „Einfügen“ wählen',
+    class: className, contenteditable: 'true', role: 'textbox', inputmode: 'none',
+    'aria-label': 'PDF oder Goodnotes einsetzen', spellcheck: 'false', autocapitalize: 'off', autocorrect: 'off',
+    'data-placeholder': 'Hier lange drücken und „Einsetzen“ wählen',
   });
-  let close;
-  zone.addEventListener('paste', async e => {
+  zone.addEventListener('paste', e => {
     e.preventDefault();
-    const files = [...(e.clipboardData?.files || [])];
-    const items = [...(e.clipboardData?.items || [])].filter(i => i.kind === 'file').map(i => i.getAsFile());
-    const pdf = [...files, ...items].find(looksLikePdf);
-    if (pdf) { close(); return gotPdf({ blob: pdf, name: pdf.name || 'Eingefügtes PDF' }); }
-    const fromText = await pdfFromText(e.clipboardData?.getData('text/plain'));
-    if (fromText) { close(); return gotPdf(fromText); }
-    const kinds = [...(e.clipboardData?.types || [])].join(', ') || 'nichts';
+    const snapshot = snapshotPaste(e.clipboardData); // must run before the first await
     zone.textContent = '';
-    toast(`Keine PDF gefunden (Zwischenablage enthält: ${kinds})`, 5000);
+    importClipboard(() => documentFromPaste(snapshot), onFailure, beforeImport);
   });
+  // This is an import target, not a text editor. Never insert pasted HTML into the library.
+  zone.addEventListener('beforeinput', e => e.preventDefault());
   zone.addEventListener('input', () => { zone.textContent = ''; });
+  return zone;
+}
+
+export function importFromClipboard() {
+  return pasteSheet();
+}
+
+function pasteSheet(message = '') {
+  document.querySelector('.clip-hint')?.remove();
+  const status = h('div', { class: 'paste-status', role: 'status' }, message);
+  let close, active = true;
+  const report = text => { if (active) status.textContent = text; };
+  const finish = () => { if (!active) return false; close(); return true; };
+  const zone = clipboardArea('paste-zone', report, finish);
+  const paste = () => {
+    zone.focus(); // keep the focus and paste call in the user's tap, required by iPad Safari
+    if (/Apple/i.test(navigator.vendor || '')) {
+      try { document.execCommand('paste'); } catch {}
+      report('Wenn iPadOS nachfragt, tippe auf „Einsetzen“. Du kannst auch direkt im Feld lange drücken und „Einsetzen“ wählen.');
+    } else {
+      importClipboard(readClipboardDocument, report, finish);
+    }
+  };
   const body = h('div', { class: 'form' },
+    h('div', { class: 'hint' }, 'Auch ohne diesen Dialog: In der Bibliothek auf eine freie Fläche lange drücken → Einsetzen.'),
     zone,
-    h('div', { class: 'hint' }, 'Kopiere vorher die PDF, z. B. in Goodnotes über Exportieren → PDF → Kopieren oder in der Dateien-App über Kopieren.'));
-  const p = sheet({ title: 'PDF einfügen', body, done: null });
-  // Close through the sheet's own cancel button so its listeners are cleaned up.
+    h('button', { class: 'pill-btn primary', onclick: paste }, icon('paste', 18), 'Einsetzen'),
+    h('div', { class: 'hint' }, 'PDF- und .goodnotes-Dateien werden anhand ihres Inhalts erkannt, auch wenn iPadOS keinen Dateityp oder Dateinamen mitliefert.'),
+    status,
+    h('details', { class: 'paste-help' },
+      h('summary', {}, 'Wenn iPadOS die Datei nicht weitergibt'),
+      h('p', {}, 'Dann kann Folio sie nicht aus der Zwischenablage lesen. Nutze „In Dateien sichern“ und wähle sie hier aus – oder den Kurzbefehl „In Folio öffnen“.'),
+      h('p', {}, 'Kurzbefehl: Dateien aus dem Teilen-Menü empfangen → Namen abrufen → Eingabedatei als Base64 codieren → Text FOLIO-FILE|Name|Base64-codiert zusammensetzen → In Zwischenablage kopieren. In Folio auf freie Fläche lange drücken und einsetzen.')),
+    h('div', { class: 'paste-file-actions' },
+      h('button', { class: 'pill-btn', onclick: () => { close(); importPdf(); } }, icon('pdf', 16), 'PDF-Datei auswählen'),
+      h('button', { class: 'pill-btn', onclick: () => { close(); importGoodnotes(); } }, icon('doc', 16), 'Goodnotes-Datei auswählen')));
+  const result = sheet({ title: 'PDF oder Goodnotes einsetzen', body, done: null, className: 'clipboard-sheet' });
   close = () => zone.closest('.sheet')?.querySelector('.sheet-head .textbtn')?.click();
-  setTimeout(() => zone.focus(), 300);
-  return p;
+  result.then(() => { active = false; });
+  zone.focus();
+  return result;
 }
 
 async function importImage() {

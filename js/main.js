@@ -47,8 +47,8 @@ async function seed() {
   settings.seeded = true; saveSettings();
 }
 
-// Drag a PDF from Files (or the desktop) onto the app to import it.
-const isPdf = f => f.type === 'application/pdf' || /\.(pdf|goodnotes)$/i.test(f.name);
+// Drag a PDF, a .goodnotes file or a Goodnotes folder export (.zip) from Files (or the desktop) onto the app to import it.
+const isPdf = f => f.type === 'application/pdf' || f.type === 'application/zip' || /\.(pdf|goodnotes|zip)$/i.test(f.name);
 document.addEventListener('dragover', e => { if ([...e.dataTransfer.items].some(i => i.kind === 'file')) e.preventDefault(); });
 document.addEventListener('drop', e => {
   const pdfs = [...e.dataTransfer.files].filter(isPdf);
@@ -64,7 +64,7 @@ function offerClipboardImport() {
   if (!settings.clipImport || document.querySelector('.backdrop')) return;
   clipHint?.remove();
   clipHint = h('button', { class: 'clip-hint', onclick: () => { clipHint.remove(); clipHint = null; importFromClipboard(); } },
-    icon('paste', 18), 'PDF aus Zwischenablage importieren');
+    icon('paste', 18), 'PDF/Goodnotes einsetzen');
   document.body.append(clipHint);
   const el = clipHint;
   setTimeout(() => { if (clipHint === el) { el.remove(); clipHint = null; } }, 7000);

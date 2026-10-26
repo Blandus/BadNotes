@@ -107,6 +107,8 @@ async function gapi(path, opts = {}) {
   return r.status === 204 ? null : r.json().catch(() => null);
 }
 const gcfg = () => (settings.gcal ||= { on: false, cals: {}, target: 'folio' });
+// Calendars added in Google "per URL" are often named after their address (with secret tokens): show only the server
+const calName = c => { if (!/^(https?|webcal):\/\//i.test(c.name)) return c.name; try { return 'Abo von ' + new URL(c.name.replace(/^webcal:/i, 'https:')).hostname; } catch { return 'Abo per URL'; } };
 const writable = c => c && (c.role === 'writer' || c.role === 'owner');
 
 async function gListCalendars() {
@@ -149,7 +151,7 @@ async function gLoadWeek(force) {
           out.push({
             key: `g|${id}|${e.id}`, source: 'google', calId: id, id: e.id, recurringEventId: e.recurringEventId || null,
             title: e.summary || '(ohne Titel)', location: e.location || '', description: e.description || '', start: s, end: Math.max(en, s), allDay,
-            color: c.color, srcName: 'Google: ' + c.name, editable: writable(c) && (!e.eventType || e.eventType === 'default'), recurring: !!e.recurringEventId,
+            color: c.color, srcName: 'Google: ' + calName(c), editable: writable(c) && (!e.eventType || e.eventType === 'default'), recurring: !!e.recurringEventId,
           });
         }
         tok = r.nextPageToken;
@@ -362,7 +364,7 @@ function draw() {
   const legend = h('div', { class: 'cal-legend' },
     h('span', { class: 'cal-src' }, h('i', { style: { background: FOLIO_COLOR } }), 'Folio'),
     ...cal.records.filter(r => r.kind === 'calfeed' && !r.deleted).map(r => h('span', { class: 'cal-src' + (r.error ? ' err' : ''), title: r.error || '' }, h('i', { style: { background: r.color } }), (r.url ? 'Abo: ' : 'Import: ') + r.name, r.error ? ' ⚠' : '')),
-    ...(cfg.on ? Object.values(cfg.cals).filter(c => c.on).map(c => h('span', { class: 'cal-src' }, h('i', { style: { background: c.color } }), 'Google: ' + c.name)) : []),
+    ...(cfg.on ? Object.values(cfg.cals).filter(c => c.on).map(c => h('span', { class: 'cal-src' }, h('i', { style: { background: c.color } }), 'Google: ' + calName(c))) : []),
     cal.gerr ? h('span', { class: 'cal-src err' }, '⚠ ' + cal.gerr) : null);
 
   bodyEl.replaceChildren(h('div', { class: 'cal' }, legend, h('div', { class: 'cal-grid' }, heads, alldayRow, scroller)));
@@ -413,7 +415,7 @@ async function editEvent(o, slot) {
   const untilRow = h('div', { class: 'cal-until', hidden: v.repeat !== 'weekly' }, h('span', { class: 'form-label' }, 'Wiederholen bis (optional)'), until);
   let repeat = v.repeat;
   const recurring = !isNew && o.recurring;
-  const targets = [['folio', 'Folio'], ...Object.entries(cfg.on ? cfg.cals : {}).filter(([, c]) => writable(c)).map(([id, c]) => [id, 'Google: ' + c.name])];
+  const targets = [['folio', 'Folio'], ...Object.entries(cfg.on ? cfg.cals : {}).filter(([, c]) => writable(c)).map(([id, c]) => [id, 'Google: ' + calName(c)])];
   const targetSel = isNew && targets.length > 1 ? h('select', { class: 'field', onchange: e => { target = e.target.value; } }, targets.map(([id, l]) => { const op = h('option', { value: id }, l); op.selected = id === target; return op; })) : null;
   const canRepeat = isNew || (o.source === 'folio' && (!recurring || scope === 'all'));
   const repeatCtl = segmented([['none', 'Einmalig'], ['weekly', 'Wöchentlich']], repeat, x => { repeat = x; untilRow.hidden = x !== 'weekly'; });
@@ -521,10 +523,10 @@ async function openSources() {
       h('div', { class: 'form-label' }, 'Google Kalender'),
       cfg.on
         ? h('div', { class: 'cal-gcals' },
-          ...Object.entries(cfg.cals).map(([id, c]) => toggle(`${c.name}${writable(c) ? '' : ' (nur lesen)'}`, c.on, on => { c.on = on; saveSettings(); cal.gcache.clear(); })),
+          ...Object.entries(cfg.cals).map(([id, c]) => toggle(`${calName(c)}${writable(c) ? '' : ' (nur lesen)'}`, c.on, on => { c.on = on; saveSettings(); cal.gcache.clear(); })),
           h('div', { class: 'form-label' }, 'Neue Termine standardmäßig in'),
           h('select', { class: 'field', onchange: e => { cfg.target = e.target.value; saveSettings(); } },
-            [['folio', 'Folio (synchronisiert über Google Drive)'], ...Object.entries(cfg.cals).filter(([, c]) => writable(c)).map(([id, c]) => [id, 'Google: ' + c.name])]
+            [['folio', 'Folio (synchronisiert über Google Drive)'], ...Object.entries(cfg.cals).filter(([, c]) => writable(c)).map(([id, c]) => [id, 'Google: ' + calName(c)])]
               .map(([id, l]) => { const op = h('option', { value: id }, l); op.selected = cfg.target === id; return op; })),
           h('div', { class: 'cal-row-btns' },
             h('button', { class: 'pill-btn', onclick: async () => { try { await gToken(); await gListCalendars(); fill(); } catch (err) { toast('⚠ ' + err.message); } } }, icon('sync', 16), 'Kalenderliste neu laden'),

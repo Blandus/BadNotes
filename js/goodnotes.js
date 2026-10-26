@@ -34,7 +34,8 @@ export async function unzip(buf) {
     const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
     const nameLen = dv.getUint16(p + 28, true), extra = dv.getUint16(p + 30, true), comment = dv.getUint16(p + 32, true);
     const local = dv.getUint32(p + 42, true);
-    const name = new TextDecoder().decode(b.subarray(p + 46, p + 46 + nameLen));
+    // ZIPs made with Windows' own tools use "\" as path separator
+    const name = new TextDecoder().decode(b.subarray(p + 46, p + 46 + nameLen)).replace(/\\/g, '/');
     p += 46 + nameLen + extra + comment;
     const start = local + 30 + dv.getUint16(local + 26, true) + dv.getUint16(local + 28, true);
     const data = b.subarray(start, start + csize);
