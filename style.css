@@ -1198,3 +1198,8 @@ button.sz-row:hover { background: var(--surface-3); }
 .offload-size { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; }
 .offload-size[hidden] { display: none; }
 .tile .thumb img.paper { border-radius: 4px; box-shadow: 0 0 0 1px var(--sep), 0 2px 8px rgba(15, 39, 71, .10); background: #fff; }
+/* rendered previews (thumbs store) shown like the canvas previews they replace */
+.thumb img.lazy-thumb { max-width: 100%; max-height: 100%; display: block; }
+.thumb img.lazy-thumb:not([src]) { width: 70%; height: 90%; background: var(--surface-2); border-radius: 4px; }
+.row-thumb img.lazy-thumb { max-width: 100%; max-height: 100%; border-radius: 2px 4px 4px 2px; box-shadow: 0 0 0 1px var(--sep); }
+.row-thumb img.lazy-thumb:not([src]) { width: 36px; height: 48px; background: var(--surface-2); }

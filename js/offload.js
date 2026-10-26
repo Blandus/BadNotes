@@ -60,19 +60,21 @@ export function withMeta(full, stub) {
 // Replace r by a stub if it is fully synced. Returns true if done.
 export async function offload(r) {
   if (!CONTENT[r.kind] || r.offloaded || r.deleted) return false;
-  const base = (await store.allBases()).find(b => b.id === r.id);
+  const base = await store.getBase(r.id);
   if (!base || base.updated !== r.updated) return false; // not (yet) identical with Drive
-  const cur = await store.get(r.id);
-  if (cur?.updated !== r.updated) return false; // edited in the meantime
-  await store.put(await makeStub(r));
+  const full = await store.get(r.id); // r may be a light record (no content)
+  if (full?.updated !== r.updated || full.offloaded) return false; // edited in the meantime
+  await store.put(await makeStub(full));
   await store.deleteBase(r.id);
   return true;
 }
 
-// Full document for r (loads it from Drive if r is a stub). Null if it can't be loaded now.
+// Full document for r: from the device (r may be a light record) or, for a stub, from Drive.
+// Null if it can't be loaded now.
 const loading = new Map();
 export function ensureLocal(r) {
-  if (!r?.offloaded) return Promise.resolve(r);
+  if (!r) return Promise.resolve(null);
+  if (!r.offloaded) return r.light ? store.get(r.id) : Promise.resolve(r);
   if (loading.has(r.id)) return loading.get(r.id);
   const p = (async () => {
     if (!hooks.signedIn()) { toast('„' + r.name + '“ liegt nur in Google Drive – bitte mit Google anmelden.', 4000); return null; }
@@ -96,19 +98,21 @@ export function ensureLocal(r) {
   return p;
 }
 
-// Automatic rule. local: Map id → record (updated in place). Returns the number of stubs made.
+// Automatic rule. Candidates come from the light list; each is loaded and measured on its own,
+// so the whole library is never in memory at once. Returns the number of stubs made.
 let lastRun = 0;
-export async function runOffload(local, { force = false } = {}) {
+export async function runOffload({ force = false } = {}) {
   if (!offloadOn() || !hooks.signedIn()) return 0;
   if (!force && Date.now() - lastRun < 3600000) return 0;
   lastRun = Date.now();
   const min = offloadMin();
   let n = 0;
-  for (const r of [...local.values()]) {
+  for (const r of await store.list()) {
     if (!CONTENT[r.kind] || r.offloaded || r.deleted || r.favorite) continue;
     if (hooks.isOpen(r.id) || Date.now() - (r.opened || 0) < RECENT_MS) continue;
-    if (recordSize(r) < min) continue;
-    if (await offload(r)) { n++; local.set(r.id, await store.get(r.id)); }
+    const full = await store.get(r.id);
+    if (!full || recordSize(full) < min) continue;
+    if (await offload(full)) n++;
   }
   if (n) emit('change', null);
   return n;

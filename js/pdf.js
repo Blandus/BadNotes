@@ -11,12 +11,16 @@ export async function pdfToPages(file) {
   if (!pdfjs) throw new Error('PDF-Bibliothek nicht geladen (offline?)');
   pdfjs.GlobalWorkerOptions.workerSrc = WORKER;
   const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  try {
   const pages = [];
+  // long books get a slightly smaller page image (still sharp for reading): keeps them at a size
+  // the device can hold and sync
+  const width = doc.numPages > 150 ? 1200 : 1600;
   for (let i = 1; i <= doc.numPages; i++) {
     toast(`PDF wird importiert: Seite ${i} von ${doc.numPages}`, 0);
     const p = await doc.getPage(i);
     const vp1 = p.getViewport({ scale: 1 });
-    const vp = p.getViewport({ scale: 1600 / vp1.width });
+    const vp = p.getViewport({ scale: width / vp1.width });
     const c = document.createElement('canvas');
     c.width = Math.round(vp.width); c.height = Math.round(vp.height);
     const ctx = c.getContext('2d');
@@ -31,6 +35,8 @@ export async function pdfToPages(file) {
       if (i === 1 && title) page.pdfTitle = title;
     } catch {}
     pages.push(page);
+    c.width = c.height = 0; // free the canvas memory now (Safari keeps it until GC otherwise)
+    p.cleanup();
   }
   try {
     const meta = (await doc.getMetadata())?.info?.Title?.trim();
@@ -38,6 +44,9 @@ export async function pdfToPages(file) {
   } catch {}
   toast(`${pages.length} ${pages.length === 1 ? 'Seite' : 'Seiten'} importiert`);
   return pages;
+  } finally {
+    doc.destroy(); // pdf.js otherwise keeps every imported PDF (and its worker data) in memory
+  }
 }
 
 // Text of one PDF page (max. 4000 chars) and its "title": the line in the largest font

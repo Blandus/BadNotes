@@ -22,6 +22,40 @@ import { toast } from './ui.js';
 import { loadYjs } from './textdoc.js';
 
 // ---------- ZIP (central directory + DecompressionStream) ----------
+// Same as unzip, but reads a File/Blob piece by piece: only the directory at the end is read up
+// front, each entry when its loader is called — a large ZIP (e.g. a folder of literature PDFs)
+// is never in memory as a whole.
+export async function unzipBlob(blob) {
+  const tailLen = Math.min(blob.size, 65557);
+  const tail = new Uint8Array(await blob.slice(blob.size - tailLen).arrayBuffer());
+  const tv = new DataView(tail.buffer);
+  let eocd = -1;
+  for (let i = tail.length - 22; i >= 0; i--) if (tv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error('Keine gültige ZIP-Datei');
+  const count = tv.getUint16(eocd + 10, true), cdSize = tv.getUint32(eocd + 12, true), cdOff = tv.getUint32(eocd + 16, true);
+  if (count === 0xffff || cdOff === 0xffffffff) throw new Error('Diese ZIP ist zu groß (ZIP64 wird nicht unterstützt)');
+  const cd = new Uint8Array(await blob.slice(cdOff, cdOff + cdSize).arrayBuffer());
+  const dv = new DataView(cd.buffer);
+  const files = new Map();
+  let p = 0;
+  for (let n = 0; n < count; n++) {
+    const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true), extra = dv.getUint16(p + 30, true), comment = dv.getUint16(p + 32, true);
+    const local = dv.getUint32(p + 42, true);
+    // ZIPs made with Windows' own tools use "\" as path separator
+    const name = new TextDecoder().decode(cd.subarray(p + 46, p + 46 + nameLen)).replace(/\\/g, '/');
+    p += 46 + nameLen + extra + comment;
+    files.set(name, async () => {
+      const lh = new DataView(await blob.slice(local, local + 30).arrayBuffer());
+      const start = local + 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
+      const data = blob.slice(start, start + csize);
+      return method === 0 ? new Uint8Array(await data.arrayBuffer())
+        : new Uint8Array(await new Response(data.stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+    });
+  }
+  return files;
+}
+
 export async function unzip(buf) {
   const b = new Uint8Array(buf), dv = new DataView(buf);
   let eocd = -1;
@@ -311,9 +345,9 @@ async function textDocBlocks(read, notesIdx, imageSrc, assets) {
 }
 
 // ---------- Whole document ----------
-export async function goodnotesToNotebook(file) {
+async function convertGoodnotes(file) {
   toast('Goodnotes-Datei wird gelesen…', 0);
-  const zip = await unzip(await file.arrayBuffer());
+  const zip = await unzipBlob(file);
   const read = async path => (zip.has(path) ? zip.get(path)() : null);
   const index = async path => {
     const map = new Map(), b = await read(path);
@@ -406,4 +440,13 @@ export async function goodnotesToNotebook(file) {
   toast(`${pages.length} Seiten · ${all.length - images - texts} Striche${images ? ` · ${images} Bilder` : ''}${texts ? ` · ${texts} Textfelder` : ''} importiert`);
   // Apple stores "Ü" as U + combining diaeresis; normalise so search and sorting work
   return { name: title.normalize('NFC'), pages };
+}
+// Converts one .goodnotes file. Afterwards the PDFs opened for its backgrounds are closed again
+// (pdf.js would otherwise keep each one in memory for the rest of the session).
+export async function goodnotesToNotebook(file) {
+  try { return await convertGoodnotes(file); }
+  finally {
+    for (const p of pdfCache.values()) p.then(d => d.destroy()).catch(() => {});
+    pdfCache.clear();
+  }
 }

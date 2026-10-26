@@ -11,7 +11,7 @@ import { openTextDoc, textLocked } from './textdoc.js';
 
 // Sample content on first start, so every view has something to show.
 async function seed() {
-  if (settings.seeded || (await store.all()).length) { settings.seeded = true; saveSettings(); return; }
+  if (settings.seeded || await store.count()) { settings.seeded = true; saveSettings(); return; }
   const uni = newFolder('Uni');
   const text = (x, y, s, size = 24, color = '#1A1A1A', w = 760) => ({ id: uid(), type: 'text', x, y, w, size, color, text: s });
   const wave = (y, color) => ({

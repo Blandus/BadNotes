@@ -1,6 +1,6 @@
 import { $, h, fmtDate, pickFile } from './util.js';
 import { icon, folioMark } from './icons.js';
-import { store, settings, saveSettings, bus, newNotebook, newFolder, cloneNotebook, newPage, COVERS, TEMPLATES, TEMPLATE_SECTIONS, PAPERS, FORMATS, PAGE_W, APP_VERSION } from './store.js';
+import { store, light, settings, saveSettings, bus, newNotebook, newFolder, cloneNotebook, newPage, COVERS, TEMPLATES, TEMPLATE_SECTIONS, PAPERS, FORMATS, PAGE_W, APP_VERSION } from './store.js';
 import { renderCover, renderThumb } from './render.js';
 import { menu, sheet, promptText, confirmBox, toast, segmented, toggle } from './ui.js';
 import { pdfToPages, loadImageFile, exportPdf } from './pdf.js';
@@ -91,12 +91,28 @@ const containsText = (r, q) => r.kind === 'textdoc' ? plainText(r).toLowerCase()
 
 const kindOk = r => lib.filter === 'all' || r.kind === lib.filter; // filter tabs
 
+// Search in the text of documents (PDF text, text boxes, text documents): the library only has
+// light records, so the documents are read one at a time in the background; titles match at once.
+let searchT;
+function searchContent(query) {
+  clearTimeout(searchT);
+  const q = query.trim().toLowerCase();
+  if (q.length < 2) { lib.hits = null; return; }
+  searchT = setTimeout(async () => {
+    const ids = new Set();
+    await store.each(r => { if (!r.deleted && !r.trashed && containsText(r, q)) ids.add(r.id); });
+    if (lib.query.trim().toLowerCase() !== q) return; // typed on meanwhile
+    lib.hits = { q, ids };
+    renderContent();
+  }, 300);
+}
+
 function items() {
   const all = live();
   let list;
   if (lib.query) {
     const q = lib.query.toLowerCase();
-    list = all.filter(r => !r.trashed && (r.name.toLowerCase().includes(q) || containsText(r, q)));
+    list = all.filter(r => !r.trashed && (r.name.toLowerCase().includes(q) || (lib.hits?.q === q.trim() && lib.hits.ids.has(r.id))));
   } else if (lib.section === 'recent') {
     return all.filter(r => !r.trashed && r.kind !== 'folder' && kindOk(r)).sort((a, b) => (b.opened || b.updated) - (a.opened || a.updated)).slice(0, 30);
   } else if (lib.section === 'favorites') list = all.filter(r => !r.trashed && r.favorite);
@@ -111,7 +127,7 @@ function items() {
 }
 
 export async function renderLibrary() {
-  records = (await store.all()).filter(r => !CAL_KINDS.has(r.kind)); // calendar records live in the calendar view
+  records = (await store.list()).filter(r => !CAL_KINDS.has(r.kind)); // calendar records live in the calendar view
   if (lib.folder && (!byId(lib.folder) || byId(lib.folder).trashed)) lib.folder = null;
   renderSidebar();
   if (lib.section === 'calendar') {
@@ -211,7 +227,7 @@ function renderHeader() {
 
   const search = h('input', {
     class: 'searchfield', type: 'search', placeholder: 'Notizen durchsuchen…', value: lib.query, 'aria-label': 'Suchen',
-    oninput: e => { lib.query = e.target.value; renderContent(); renderHeaderTitle(); },
+    oninput: e => { lib.query = e.target.value; renderContent(); renderHeaderTitle(); searchContent(lib.query); },
     onkeydown: e => { if (e.key === 'Escape') { lib.query = ''; e.target.value = ''; e.target.blur(); renderContent(); renderHeaderTitle(); } },
   });
   const titlebar = h('div', { class: 'lib-titlebar' },
@@ -271,11 +287,48 @@ function thumbFor(r, width) {
   if (r.offloaded && !r.cover) { // kept only in Drive: the small preview saved with the stub
     return r.thumb ? h('img', { class: 'paper stub-thumb', src: r.thumb, alt: '' }) : h('div', { class: 'paper stub-thumb empty' }, icon('cloud', 28));
   }
-  const c = h('canvas', { class: r.cover ? 'cover' : 'paper' });
-  if (r.kind === 'textdoc') { renderTextThumb(c, r, width * 2); return c; }
-  if (r.cover) renderCover(c, r.cover, width * 2);
-  else if (r.pages[0]) renderThumb(c, r.pages[0], width * 2);
-  return c;
+  if (r.cover) { const c = h('canvas', { class: 'cover' }); renderCover(c, r.cover, width * 2); return c; }
+  // first page / text preview: rendered once from the full document, then kept in the 'thumbs'
+  // store, so listing the library never loads document content (see queueThumb)
+  const img = h('img', { class: 'paper lazy-thumb', alt: '' });
+  queueThumb(r, img);
+  return img;
+}
+
+// Previews are made one at a time: each needs its document loaded (a long PDF can be large).
+const thumbJobs = [];
+let thumbRunning = false;
+const madeThumbs = new Map(); // id → { updated, src } of this session (no store round trip on re-render)
+function queueThumb(r, img) {
+  const known = madeThumbs.get(r.id);
+  if (known?.updated === r.updated) { img.src = known.src; return; }
+  thumbJobs.push([r, img]);
+  if (!thumbRunning) runThumbJobs();
+}
+async function runThumbJobs() {
+  thumbRunning = true;
+  while (thumbJobs.length) {
+    const [r, img] = thumbJobs.shift();
+    if (!img.isConnected && thumbJobs.length) continue; // re-rendered meanwhile
+    try {
+      let t = madeThumbs.get(r.id);
+      if (t?.updated !== r.updated) t = await store.getThumb(r.id);
+      if (t?.updated !== r.updated) {
+        const full = await store.get(r.id);
+        if (!full) continue;
+        const c = document.createElement('canvas');
+        if (full.kind === 'textdoc') renderTextThumb(c, full, 250);
+        else if (full.pages?.[0]) await renderThumb(c, full.pages[0], 250);
+        else continue;
+        t = { id: r.id, updated: r.updated, src: c.toDataURL('image/jpeg', 0.8) };
+        c.width = c.height = 0;
+        await store.putThumb(t);
+      }
+      madeThumbs.set(r.id, t);
+      img.src = t.src;
+    } catch {}
+  }
+  thumbRunning = false;
 }
 
 // "25. Okt. 2026 um 13:38"
@@ -490,33 +543,42 @@ async function update(r, patch) {
   if (patch.favorite && r.offloaded) ensureLocal(r);
 }
 async function offloadNow(r) {
-  if (await offload(r)) toast(`„${r.name}“ liegt jetzt nur in Google Drive (${fmtBytes(recordSize(r))} frei)`, 3500);
+  if (await offload(r)) toast(`„${r.name}“ liegt jetzt nur in Google Drive (${fmtBytes((await store.getMeta(r.id))?.size || 0)} frei)`, 3500);
   else toast('Geht erst, wenn die neueste Fassung mit Google Drive synchronisiert ist.', 4000);
 }
 
 async function rename(r) {
-  const name = await promptText('Umbenennen', r.name, '', r.kind === 'notebook' ? suggestNames(r) : []);
+  // the library holds light records: the content (name suggestions, a text document's title) comes from the full one
+  const doc = r.offloaded ? r : (await store.get(r.id)) || r;
+  const name = await promptText('Umbenennen', r.name, '', r.kind === 'notebook' && doc.pages ? suggestNames(doc) : []);
   if (!name) return;
   // a text document's name is its title block
-  const title = r.kind === 'textdoc' && r.blocks.find(b => b.type === 'title');
-  if (title) title.children = [{ text: name }];
+  const title = r.kind === 'textdoc' && doc.blocks?.find(b => b.type === 'title');
+  if (title) { title.children = [{ text: name }]; Object.assign(doc, { name, updated: Date.now() }); return store.put(doc); }
   update(r, { name });
 }
 
 async function duplicate(ids) {
-  for (const r of ids.map(byId)) if (r?.offloaded) { const d = await ensureLocal(r); if (!d) return; records[records.indexOf(r)] = d; }
-  const copies = ids.map(byId).filter(r => r?.kind === 'notebook' || r?.kind === 'textdoc').map(r => r.kind === 'textdoc'
-    ? { ...structuredClone(r), id: newTextDoc().id, name: r.name + ' Kopie', created: Date.now(), updated: Date.now(), opened: Date.now(), favorite: false }
-    : cloneNotebook(r, r.name + ' Kopie'));
-  if (!copies.length) return toast('Ordner können nicht dupliziert werden');
-  await store.putMany(copies);
+  // one document at a time: each copy is loaded, cloned and saved before the next
+  let n = 0;
+  for (const r of ids.map(byId)) {
+    if (r?.kind !== 'notebook' && r?.kind !== 'textdoc') continue;
+    const d = await ensureLocal(r);
+    if (!d) return;
+    const copy = d.kind === 'textdoc'
+      ? { ...structuredClone(d), id: newTextDoc().id, name: d.name + ' Kopie', created: Date.now(), updated: Date.now(), opened: Date.now(), favorite: false }
+      : cloneNotebook(d, d.name + ' Kopie');
+    for (const k of ['offloaded', 'remoteUpd', 'size', 'pageCount', 'thumb', 'conflicts', 'light']) delete copy[k];
+    await store.put(copy); n++;
+  }
+  if (!n) return toast('Ordner können nicht dupliziert werden');
   lib.selecting = false; lib.selected.clear();
-  toast(copies.length === 1 ? 'Dupliziert' : `${copies.length} Dokumente dupliziert`);
+  toast(n === 1 ? 'Dupliziert' : `${n} Dokumente dupliziert`);
 }
 
 // Folder picker sheet. Resolves to a folder id, null for the top level, or undefined when cancelled.
 async function pickFolder(title, doneLabel, { exclude = new Set(), preselect } = {}) {
-  records = (await store.all()).filter(r => !CAL_KINDS.has(r.kind)); // calendar records live in the calendar view
+  records = (await store.list()).filter(r => !CAL_KINDS.has(r.kind)); // calendar records live in the calendar view
   const folders = live().filter(r => r.kind === 'folder' && !r.trashed && !exclude.has(r.id));
   let target = preselect;
   const tree = (parent, depth) => folders.filter(f => (f.parent || null) === parent).sort((a, b) => a.name.localeCompare(b.name, 'de'))
@@ -802,8 +864,8 @@ export async function importPdfFile(file, name = file.name) {
   const gn = await isGoodnotes(file);
   if (gn) { // a ZIP of a whole Goodnotes folder ("Exportieren" on a folder) instead of one document?
     try {
-      const { unzip } = await import('./goodnotes.js');
-      const zip = await unzip(await file.arrayBuffer());
+      const { unzipBlob } = await import('./goodnotes.js');
+      const zip = await unzipBlob(file); // reads only the ZIP's directory, entries later one by one
       if (!zip.has('index.events.pb') && [...zip.keys()].some(k => ZIP_DOC.test(k))) return importGoodnotesFolder(file, zip);
     } catch { /* not readable as ZIP: the document import below reports it */ }
   }
@@ -853,7 +915,7 @@ async function importGoodnotesFolder(file, zip) {
 
   const parent = await pickFolder(`${label} importieren nach`, 'Weiter', { preselect: lib.section === 'docs' ? lib.folder : null });
   if (parent === undefined) return;
-  records = (await store.all()).filter(r => !CAL_KINDS.has(r.kind));
+  records = (await store.list()).filter(r => !CAL_KINDS.has(r.kind));
   const sameName = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
   const existingFolder = (name, par) => live().find(r => r.kind === 'folder' && !r.trashed && (r.parent || null) === par && sameName(r.name, name));
   const clashes = roots.filter(n => existingFolder(n, parent));
@@ -902,7 +964,7 @@ async function importGoodnotesFolder(file, zip) {
         const name = uniqueName(want, par, kind);
         if (name !== want) renamed.push(`${want} → ${name}`);
         const rec = doc.blocks ? { ...newTextDoc({ name, parent: par }), blocks: doc.blocks } : newNotebook({ name, parent: par, pages: doc.pages });
-        await store.put(rec); records.push(rec);
+        await store.put(rec); records.push(light(rec)); // only the light copy stays in memory
       } catch (err) { failed.push([k, err.message]); }
     }
   } finally { toast(`Import fertig: ${docs.length - failed.length} von ${docs.length} Dokumenten`, 4000); }
@@ -1121,16 +1183,22 @@ function storageBox() {
   (async () => {
     const row = (label, value, sub) => h('div', { class: 'storage-row' }, h('span', {}, label, sub ? h('span', { class: 'hint' }, ' ' + sub) : null), h('b', {}, value));
     const size = r => JSON.stringify(r).length;
-    const all = (await store.all()).filter(r => !r.deleted);
-    const docs = all.filter(r => !CAL_KINDS.has(r.kind)), cal = all.filter(r => CAL_KINDS.has(r.kind));
-    const docBytes = docs.reduce((s, r) => s + size(r), 0), calBytes = cal.reduce((s, r) => s + size(r), 0);
-    let baseBytes = 0;
-    try { baseBytes = (await store.allBases()).reduce((s, r) => s + size(r), 0); } catch {}
+    // measured one record at a time (the whole library at once could exceed the device's memory)
+    const docs = [], sizes = new Map();
+    let docBytes = 0, calBytes = 0, baseBytes = 0;
+    await store.each(r => {
+      if (r.deleted) return;
+      const n = size(r);
+      if (CAL_KINDS.has(r.kind)) { calBytes += n; return; }
+      docBytes += n; sizes.set(r.id, n);
+      docs.push({ id: r.id, name: r.name, kind: r.kind, offloaded: r.offloaded, size: r.size });
+    });
+    try { await store.each(r => { baseBytes += size(r); }, 'bases'); } catch {}
     let appBytes = 0;
     try { for (const k of await caches.keys()) { const c = await caches.open(k); for (const req of await c.keys()) appBytes += (await (await c.match(req)).blob()).size; } } catch {}
     let est = null;
     try { est = await navigator.storage?.estimate?.(); } catch {}
-    const biggest = docs.filter(r => r.kind !== 'folder' && !r.offloaded).map(r => [r, size(r)]).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    const biggest = docs.filter(r => r.kind !== 'folder' && !r.offloaded).map(r => [r, sizes.get(r.id)]).sort((a, b) => b[1] - a[1]).slice(0, 3);
     const stubs = docs.filter(r => r.offloaded);
     box.replaceChildren(...[
       stubs.length ? row('Nur in Google Drive', fmtBytes(stubs.reduce((s, r) => s + (r.size || 0), 0)), `(${stubs.length} Dokument${stubs.length === 1 ? '' : 'e'}, hier nicht belegt)`) : null,
@@ -1160,8 +1228,7 @@ function offloadBox() {
       : 'Wirkt nur mit Google-Drive-Sync: Große Dokumente bleiben dann nur in Drive, Favoriten immer auf dem Gerät.'),
     signedIn() && offloadOn() ? h('button', { class: 'pill-btn', onclick: async e => {
       e.currentTarget.disabled = true;
-      const local = new Map((await store.all()).map(r => [r.id, r]));
-      const n = await runOffload(local, { force: true });
+      const n = await runOffload({ force: true });
       toast(n ? `${n} Dokument(e) liegen jetzt nur in Google Drive` : 'Nichts zum Auslagern (zu klein, Favorit, kürzlich geöffnet oder noch nicht synchronisiert)', 4000);
       e.currentTarget.disabled = false;
     } }, icon('cloud', 16), 'Jetzt aufräumen') : null);

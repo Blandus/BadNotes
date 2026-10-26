@@ -1,7 +1,7 @@
 // Google Drive sync. Every record (notebook, text document, folder) is stored as <id>.json in a
 // "Folio" folder (older installs: "BadNotes" / "Notizen-App"). Per record, changes made on this
 // device and on Drive since the last common version (the "base") are merged (merge.js).
-import { store, settings, saveSettings, emit, migrate } from './store.js';
+import { store, settings, saveSettings, emit, migrate, light } from './store.js';
 import { uid } from './util.js';
 import { merge3, mergeable } from './merge.js';
 import { makeStub, withMeta, runOffload, configureOffload } from './offload.js';
@@ -154,8 +154,9 @@ async function pushIfUnchanged(rec, folders, expected) {
     ? { appProperties: { updated: String(rec.updated) } }
     : { name: rec.id + '.json', parents: [folders[0]], appProperties: { updated: String(rec.updated) } };
   const b = 'bnd' + uid();
-  const body = `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
-    `--${b}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(rec)}\r\n--${b}--`;
+  // Blob parts instead of one concatenated string: a large document is held as text only once
+  const body = new Blob([`--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
+    `--${b}\r\nContent-Type: application/json\r\n\r\n`, JSON.stringify(rec), `\r\n--${b}--`]);
   await gapi(`https://www.googleapis.com/upload/drive/v3/files${cur ? '/' + cur.id : ''}?uploadType=multipart&fields=id`, {
     method: cur ? 'PATCH' : 'POST',
     headers: { 'Content-Type': 'multipart/related; boundary=' + b },
@@ -211,7 +212,9 @@ export async function syncGoodnotesCopies(folders, local) {
       continue;
     }
     if (r.offloaded || Date.now() - r.updated < GN_QUIET_MS || built >= GN_PER_RUN) continue; // stubs have no content to build from
-    const blob = await notebookToGoodnotes(r, { quiet: true });
+    const full = r.light ? await store.get(r.id) : r; // loaded only for building, dropped afterwards
+    if (!full || full.offloaded) continue;
+    const blob = await notebookToGoodnotes(full, { quiet: true });
     const props = { gnFor: r.id, updated: String(r.updated) };
     const meta = copy ? { name: gnName(r), appProperties: props } : { name: gnName(r), parents: [dir], appProperties: props };
     const b = 'bnd' + uid();
@@ -231,7 +234,15 @@ export async function syncGoodnotesCopies(folders, local) {
 const contentKey = pages => JSON.stringify(pages, (k, v) => (k === 'id' ? undefined : v));
 const tombstone = (r, now) => ({ kind: r.kind, id: r.id, name: r.name, deleted: true, updated: now, pages: [] });
 
-export function mergeDuplicates(records, now = Date.now()) {
+// Notebook content equality: records may be light (no pages), then both are loaded one at a time.
+const samePages = (a, b) => contentKey(a.pages) === contentKey(b.pages);
+async function sameContent(a, b) {
+  if (!a.light && !b.light) return samePages(a, b);
+  const fa = await store.get(a.id), fb = await store.get(b.id);
+  return !!fa && !!fb && samePages(fa, fb);
+}
+
+export async function mergeDuplicates(records, now = Date.now(), same = samePages) {
   const live = new Map(records.filter(r => !r.deleted && !r.trashed).map(r => [r.id, r]));
   const changed = new Map();
   const groupBy = (kind, key) => {
@@ -251,8 +262,9 @@ export function mergeDuplicates(records, now = Date.now()) {
   }
   // Notebooks: only exact copies (same name, same place, same content) are merged.
   // (stubs of documents kept only in Drive have no content to compare: never merged)
-  for (const [, ...rest] of groupBy('notebook', r => (r.offloaded ? 'stub|' + r.id : `${r.parent || ''}|${r.name.trim().toLowerCase()}|${contentKey(r.pages)}`))) {
-    for (const d of rest) { live.delete(d.id); changed.set(d.id, tombstone(d, now)); }
+  // Candidates by name, place and page count; the content itself is compared per pair.
+  for (const [keep, ...rest] of groupBy('notebook', r => (r.offloaded ? 'stub|' + r.id : `${r.parent || ''}|${r.name.trim().toLowerCase()}|${r.pageCount ?? r.pages?.length}`))) {
+    for (const d of rest) if (await same(keep, d)) { live.delete(d.id); changed.set(d.id, tombstone(d, now)); }
   }
   return [...changed.values()];
 }
@@ -272,22 +284,26 @@ export async function sync(interactive) {
     // only record files (the folder also holds the "Goodnotes" sub-folder)
     const { byId: remote, dupes } = pickNewest((await listFiles(`${inFolders(folders)} and trashed=false`)).filter(f => f.name.endsWith('.json')));
 
-    const local = new Map((await store.all()).map(n => [n.id, n]));
-    const bases = new Map((await store.allBases()).map(b => [b.id, b]));
+    // Light records only (no pages/images): a full document is loaded just when it has to be
+    // uploaded or merged, and dropped again right after — never the whole library at once.
+    // Bases are likewise read one at a time.
+    const local = new Map((await store.list()).map(n => [n.id, n]));
     const remoteUpd = new Map([...remote].map(([id, f]) => [id, rUpd(f)]));
     let down = 0, up = 0, mergedN = 0, conflictN = 0;
     const download = async f => migrate(await (await gapi(`files/${f.id}?alt=media`)).json());
     // local copy still the one read at the start? (an edit in the meantime is handled next run)
-    const untouched = async (id, l) => (await store.get(id))?.updated === l?.updated;
+    const untouched = async (id, l) => (await store.getMeta(id))?.updated === l?.updated;
     const push = async rec => {
       if (rec.offloaded) return false; // a stub is never uploaded (its changes go onto the Drive version below)
+      if (rec.light) rec = await store.get(rec.id);
+      if (!rec || rec.offloaded) return false;
       if (!(await pushIfUnchanged(rec, folders, remoteUpd.has(rec.id) ? remoteUpd.get(rec.id) : null))) return false;
       remoteUpd.set(rec.id, rec.updated); await store.putBase(rec); up++;
       return true;
     };
     // Per record: what changed since the base (the version both sides last agreed on)?
     for (const id of new Set([...remote.keys(), ...local.keys()])) {
-      const f = remote.get(id), l = local.get(id), b = bases.get(id);
+      const f = remote.get(id), l = local.get(id);
       const rU = f ? rUpd(f) : null;
       // Only in Drive (offload.js): the stub stands for Drive version remoteUpd. Its own changes are
       // metadata (name, folder, favourite …): put them onto the Drive version and upload that.
@@ -299,7 +315,7 @@ export async function sync(interactive) {
         if (isLocked(id)) continue;
         const rec = await download(f);
         if (!(await untouched(id, l))) continue;
-        if (rec.deleted) { await store.put(rec); await store.putBase(rec); local.set(id, rec); down++; emit('remote', id); continue; }
+        if (rec.deleted) { await store.put(rec); await store.putBase(rec); local.set(id, light(rec)); down++; emit('remote', id); continue; }
         let full = rec;
         if (metaChanged) {
           full = { ...withMeta(rec, l), updated: Math.max(Date.now(), rU + 1, l.updated + 1) };
@@ -308,10 +324,15 @@ export async function sync(interactive) {
         } else down++;
         const stub = await makeStub(full);
         if (!(await untouched(id, l))) continue;
-        await store.put(stub); await store.deleteBase(id); local.set(id, stub);
+        await store.put(stub); await store.deleteBase(id); local.set(id, light(stub));
         continue;
       }
-      if (l && f && l.updated === rU) { if (b?.updated !== rU) await store.putBase(l); continue; } // in step
+      if (l && f && l.updated === rU) { // in step
+        const bm = await store.getBase(id);
+        if (bm?.updated !== rU) { const full = await store.get(id); if (full?.updated === rU) await store.putBase(full); }
+        continue;
+      }
+      const b = await store.getBase(id);
       let lChanged = !!l && (!b || l.updated !== b.updated);
       let rChanged = !!f && (!b || rU !== b.updated);
       // No base yet (first sync of this record with this version): nothing to merge against —
@@ -322,32 +343,34 @@ export async function sync(interactive) {
       if (!lChanged) { // only Drive changed → take it
         const rec = await download(f);
         if (!(await untouched(id, l))) continue;
-        await store.put(rec); await store.putBase(rec); local.set(id, rec); down++;
+        await store.put(rec); await store.putBase(rec); local.set(id, light(rec)); down++;
         emit('remote', id);
         continue;
       }
       if (!rChanged) { await push(l); continue; } // only here changed → upload
       // Both changed: merge against the base.
       const rec = await download(f);
+      const lFull = await store.get(id);
+      if (!lFull || lFull.updated !== l.updated) continue; // edited meanwhile: next run
       let result;
-      if (mergeable(b) && mergeable(l) && mergeable(rec)) {
-        const { rec: m, notes } = merge3(b, l, rec);
+      if (mergeable(b) && mergeable(lFull) && mergeable(rec)) {
+        const { rec: m, notes } = merge3(b, lFull, rec);
         m.updated = Math.max(Date.now(), l.updated + 1, rU + 1);
         result = m; conflictN += notes.length;
       } else {
         // cannot be merged item by item: keep this version, add the other one as a separate copy
         const copy = { ...structuredClone(rec), id: uid(), name: `${rec.name || 'Dokument'} (Konflikt-Kopie)`, updated: Date.now() };
-        await store.put(copy); local.set(copy.id, copy); await push(copy);
-        result = { ...l, updated: Math.max(Date.now(), rU + 1), conflicts: [...(l.conflicts || []), { at: Date.now(), text: `Auf zwei Geräten geändert – die andere Fassung liegt als „${copy.name}“ daneben.` }] };
+        await store.put(copy); local.set(copy.id, light(copy)); await push(copy);
+        result = { ...lFull, updated: Math.max(Date.now(), rU + 1), conflicts: [...(lFull.conflicts || []), { at: Date.now(), text: `Auf zwei Geräten geändert – die andere Fassung liegt als „${copy.name}“ daneben.` }] };
         conflictN++;
       }
       if (!(await untouched(id, l))) continue;
-      await store.put(result); local.set(id, result); mergedN++; down++;
+      await store.put(result); local.set(id, light(result)); mergedN++; down++;
       emit('remote', id);
       await push(result);
     }
     // Merge duplicates (e.g. sample notebooks created separately on two devices) and share the result.
-    const merged = mergeDuplicates([...local.values()]);
+    const merged = await mergeDuplicates([...local.values()], Date.now(), sameContent);
     if (merged.length) {
       await store.putMany(merged);
       for (const r of merged) { emit('remote', r.id); await push(r); }
@@ -356,7 +379,7 @@ export async function sync(interactive) {
     for (const d of dupes) if (rUpd(d) <= rUpd(remote.get(recId(d)))) await trash(d.id);
     // Large documents only in Drive (Einstellungen → Speicher), at most once an hour.
     let offNote = '';
-    try { const n = await runOffload(local); if (n) offNote = ` · ${n} nur noch in Drive`; } catch {}
+    try { const n = await runOffload(); if (n) offNote = ` · ${n} nur noch in Drive`; } catch {}
     let gnNote = '';
     if (settings.gnCopies !== false) {
       setStatus('Goodnotes-Kopien…');

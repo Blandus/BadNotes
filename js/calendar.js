@@ -286,7 +286,7 @@ function layout(list) {
 let headEl, bodyEl;
 export async function renderCalendar(head, content) {
   headEl = head; bodyEl = content;
-  cal.records = (await store.all()).filter(r => CAL_KINDS.has(r.kind));
+  cal.records = (await store.list()).filter(r => CAL_KINDS.has(r.kind));
   if (gcfg().on && gValid() && !cal.gcache.has(cal.ws) && !cal.loadingG) gLoadWeek().then(render);
   draw();
 }
@@ -549,11 +549,11 @@ async function openSources() {
       h('div', { class: 'cal-sub' }, url, h('button', { class: 'pill-btn', onclick: async e => {
         if (!url.value.trim()) return;
         e.currentTarget.disabled = true;
-        if (await subscribe(url.value)) { cal.records = (await store.all()).filter(r => CAL_KINDS.has(r.kind)); fill(); }
+        if (await subscribe(url.value)) { cal.records = (await store.list()).filter(r => CAL_KINDS.has(r.kind)); fill(); }
         else e.currentTarget.disabled = false;
       } }, 'Abonnieren')),
       h('p', { class: 'cal-hint' }, 'Abos werden nur beim Tippen auf „Aktualisieren“ neu geladen. Die Adresse eines privaten Kalenders ist wie ein Passwort: Sie wird nur auf deinen Geräten und in deinem Google Drive gespeichert.'),
-      h('button', { class: 'pill-btn', onclick: async () => { await importFile(); cal.records = (await store.all()).filter(r => CAL_KINDS.has(r.kind)); fill(); } }, icon('download', 16), 'ICS-Datei importieren …'));
+      h('button', { class: 'pill-btn', onclick: async () => { await importFile(); cal.records = (await store.list()).filter(r => CAL_KINDS.has(r.kind)); fill(); } }, icon('download', 16), 'ICS-Datei importieren …'));
   };
   fill();
   await sheet({ title: 'Kalenderquellen', done: 'Fertig', cancel: false, body: wrap });

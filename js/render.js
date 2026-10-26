@@ -7,13 +7,34 @@ export const pageH = p => p.h || 1414;
 export const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif';
 const measure = document.createElement('canvas').getContext('2d');
 
-const imgCache = new Map();
-export function loadImage(src) {
-  if (!imgCache.has(src)) imgCache.set(src, new Promise(res => {
-    const i = new Image(); i.onload = () => res(i); i.onerror = () => res(null); i.src = src;
-  }));
-  return imgCache.get(src);
+// Decoded images (page backgrounds, pictures), least recently used first. Bounded: one imported
+// PDF page (1600×2263) takes ~14 MB decoded, so keeping all of them made long documents hold
+// hundreds of MB until the app was reloaded ("Out of Memory"). Over the budget, the images
+// unused for the longest time are dropped (the browser frees them; they are decoded again when
+// needed). A few always stay, so the visible pages never have to wait twice.
+const IMG_BUDGET = 96e6, IMG_KEEP = 4;
+const imgCache = new Map(); // src → { p: Promise<Image|null>, bytes, gone }
+let imgBytes = 0;
+function trimImages() {
+  for (const [src, e] of imgCache) {
+    if (imgBytes <= IMG_BUDGET || imgCache.size <= IMG_KEEP) break;
+    imgCache.delete(src); e.gone = true; imgBytes -= e.bytes;
+  }
 }
+export function loadImage(src) {
+  let e = imgCache.get(src);
+  if (e) { imgCache.delete(src); imgCache.set(src, e); return e.p; } // now the most recently used
+  e = { bytes: 0, gone: false };
+  e.p = new Promise(res => {
+    const i = new Image();
+    i.onload = () => { if (!e.gone) { e.bytes = i.naturalWidth * i.naturalHeight * 4; imgBytes += e.bytes; trimImages(); } res(i); };
+    i.onerror = () => { if (imgCache.get(src) === e) imgCache.delete(src); res(null); };
+    i.src = src;
+  });
+  imgCache.set(src, e);
+  return e.p;
+}
+export const imageCacheBytes = () => imgBytes;
 
 // ---------- Paper templates ----------
 export function drawTemplate(ctx, t, h, dark = false) {
