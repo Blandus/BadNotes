@@ -6,7 +6,7 @@ import { menu, sheet, promptText, confirmBox, toast, segmented, toggle } from '.
 import { pdfToPages, loadImageFile, exportPdf } from './pdf.js';
 import { openDoc } from './editor.js';
 import { suggestNames } from './suggest.js';
-import { sync } from './sync.js';
+import { sync, signIn, signOut, signedIn } from './sync.js';
 import { newTextDoc, openTextDoc, renderTextThumb, plainText, printDoc } from './textdoc.js';
 
 const SECTIONS = {
@@ -65,7 +65,8 @@ export async function renderLibrary() {
   renderContent();
 }
 bus.addEventListener('change', () => { if (!root.hidden) renderLibrary(); });
-bus.addEventListener('sync', () => { const s = $('#sbSync span'); if (s) s.textContent = settings.syncStatus || ''; });
+bus.addEventListener('sync', () => { const s = $('#sbStatus'); if (s) s.textContent = settings.syncStatus || 'Synchronisieren'; });
+bus.addEventListener('account', () => renderSidebar());
 
 function go(section, folder = null) {
   lib.section = section; lib.folder = folder; lib.query = '';
@@ -99,9 +100,21 @@ function renderSidebar() {
         onclick: () => go('docs', f.id),
       }, h('i', { class: 'sb-dot', style: { background: FOLDER_DOTS[i % FOLDER_DOTS.length] } }), h('span', {}, f.name)))),
     h('div', { class: 'sb-foot' },
-      h('button', { id: 'sbSync', class: 'sb-sync', title: 'Jetzt synchronisieren', onclick: () => sync(true) },
-        icon('sync', 16), h('span', {}, settings.syncStatus || (settings.clientId ? 'Synchronisieren' : 'Sync nicht eingerichtet'))),
+      signedIn()
+        ? h('button', { id: 'sbSync', class: 'sb-sync', title: 'Jetzt synchronisieren', onclick: () => sync(true) },
+          h('span', { class: 'sb-avatar' }, (settings.account?.name || settings.account?.email || 'G')[0].toUpperCase()),
+          h('span', { class: 'sb-acc' },
+            h('b', {}, settings.account?.name || settings.account?.email || 'Google Drive'),
+            h('span', { id: 'sbStatus' }, settings.syncStatus || 'Synchronisieren')))
+        : h('button', { class: 'sb-signin', onclick: signIn }, googleG(), h('span', {}, 'Mit Google anmelden')),
       h('button', { class: 'sb-gear', title: 'Einstellungen', 'aria-label': 'Einstellungen', onclick: openSettings }, icon('gear', 18))));
+}
+// Google's "G" (official brand colours, as Google's sign-in guidelines ask for on sign-in buttons)
+function googleG() {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('viewBox', '0 0 48 48'); s.setAttribute('width', 18); s.setAttribute('height', 18); s.setAttribute('aria-hidden', 'true');
+  s.innerHTML = '<path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>';
+  return s;
 }
 
 // ---------- Header ----------
@@ -753,7 +766,16 @@ export function applyTheme() {
 }
 
 export async function openSettings() {
-  const clientId = h('input', { class: 'field', value: settings.clientId || '', placeholder: 'xxxx.apps.googleusercontent.com' });
+  const account = signedIn()
+    ? h('div', { class: 'group-box acc-box' },
+      h('div', { class: 'acc-row' },
+        h('span', { class: 'sb-avatar big' }, (settings.account?.name || settings.account?.email || 'G')[0].toUpperCase()),
+        h('div', { class: 'acc-text' }, h('b', {}, settings.account?.name || 'Google-Konto'), h('div', { class: 'hint' }, settings.account?.email || '')),
+        h('button', { class: 'pill-btn', onclick: () => { signOut(); renderSidebar(); document.querySelector('.sheet-head .textbtn')?.click(); } }, 'Abmelden')),
+      h('div', { class: 'hint' }, 'Deine Notizen liegen im Ordner „Folio“ in deinem Google Drive. Folio sieht nur Dateien, die es selbst angelegt hat.'))
+    : h('div', { class: 'group-box acc-box' },
+      h('button', { class: 'sb-signin wide', onclick: () => { document.querySelector('.sheet-head .textbtn')?.click(); signIn(); } }, googleG(), h('span', {}, 'Mit Google anmelden')),
+      h('div', { class: 'hint' }, 'Synchronisiert deine Notizen über dein eigenes Google Drive zwischen allen Geräten.'));
   const body = h('div', { class: 'form' },
     h('div', { class: 'form-label' }, 'Darstellung'),
     segmented([['system', 'System'], ['light', 'Hell'], ['dark', 'Dunkel']], settings.theme || 'system', v => { settings.theme = v; saveSettings(); applyTheme(); }),
@@ -761,13 +783,12 @@ export async function openSettings() {
     h('div', { class: 'group-box' },
       toggle('Nur mit Stift zeichnen', !settings.fingerDraw, v => { settings.fingerDraw = !v; saveSettings(); }),
       h('div', { class: 'hint' }, 'An: Finger scrollen und zoomen, nur der Apple Pencil zeichnet.')),
-    h('div', { class: 'form-label' }, 'Google-Drive-Synchronisation'),
-    clientId,
-    h('div', { class: 'hint' }, 'OAuth-Client-ID aus der Google Cloud Console (siehe README).'),
+    h('div', { class: 'form-label' }, 'Synchronisation'),
+    account,
     h('div', { class: 'group-box', style: { marginTop: '10px' } },
       toggle('Goodnotes-Kopien in Drive', settings.gnCopies !== false, v => { settings.gnCopies = v; saveSettings(); }),
       h('div', { class: 'hint' }, 'Legt zu jedem Notizbuch eine .goodnotes-Datei im Drive-Ordner der App unter „Goodnotes“ ab (aktualisiert eine Minute nach der letzten Änderung). Öffnen in Goodnotes: Dateien-App → Google Drive.')),
-    h('div', { class: 'about' }, folioMark(40), h('div', {}, h('div', { class: 'about-name' }, 'Folio'), h('div', { class: 'hint' }, `Make space for ideas. · Version ${APP_VERSION}`))));
+    h('div', { class: 'about' }, folioMark(40), h('div', {}, h('div', { class: 'about-name' }, 'Folio'), h('div', { class: 'hint' }, `Make space for ideas. · Version ${APP_VERSION} · `, h('a', { href: 'datenschutz.html', target: '_blank', rel: 'noopener' }, 'Datenschutz')))));
   const ok = await sheet({ title: 'Einstellungen', body });
-  if (ok) { settings.clientId = clientId.value.trim(); saveSettings(); renderSidebar(); }
+  if (ok) renderSidebar();
 }

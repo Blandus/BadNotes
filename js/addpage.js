@@ -9,10 +9,16 @@ import { popover, closePopover, menu, segmented, toast } from './ui.js';
 import { loadImageFile, pdfToPages } from './pdf.js';
 
 const COVER_NAMES = ['Ink Navy', 'Tiefblau', 'Mist Blue', 'Sage Green', 'Tannengrün', 'Schiefer', 'Warm Stone', 'Sand', 'Ocker', 'Pflaume', 'Graphit', 'Soft Ivory'];
-const SIZES = { a4: ['A4', 1414], letter: ['Letter', 1294] };
+// Paper sizes in mm (portrait). Only the aspect ratio shapes the page (pages are 1000 units wide),
+// so A3–A6 give the same page shape; A7 and the others differ slightly.
+const SIZES = {
+  standard: ['Standard', [216, 280]], a3: ['A3', [297, 420]], a4: ['A4', [210, 297]], a5: ['A5', [148, 210]], a6: ['A6', [105, 148]],
+  a7: ['A7 (iPhone)', [74, 105]], letter: ['Letter-Format', [216, 279]], tabloid: ['Tabloid-Format', [279, 432]],
+};
 const PAPER_ORDER = ['yellow', 'white', 'dark'];
 const PAPER_NAMES = { white: 'Weiß', yellow: 'Gelb', dark: 'Dunkel' };
-const heightOf = (size, orient) => (orient === 'landscape' ? Math.round(PAGE_W * PAGE_W / SIZES[size][1]) : SIZES[size][1]);
+const dimsOf = o => (o.size === 'custom' ? o.custom : SIZES[o.size][1]);
+const heightOf = o => { const [w, hh] = dimsOf(o); return Math.round(o.orient === 'landscape' ? PAGE_W * w / hh : PAGE_W * hh / w); };
 
 // ctx: { doc, cur (index), insert(pages, at) }
 export function addPageMenu(anchor, ctx) {
@@ -111,21 +117,25 @@ function templateWindow(ctx, cur, insert) {
     tab: 'paper',
     template: cur && !cur.bg && cur.template in TEMPLATES ? cur.template : (settings.lastTemplate in TEMPLATES ? settings.lastTemplate : 'lined'),
     paper: cur && !cur.bg && cur.paper in PAPERS ? cur.paper : 'white',
-    size: Math.abs(curH - 1294) < 2 || Math.abs(curH - Math.round(PAGE_W * PAGE_W / 1294)) < 2 ? 'letter' : 'a4',
     orient: curH < PAGE_W ? 'landscape' : 'portrait',
+    size: 'a4', custom: [210, 297],
     cover: ctx.doc.cover || COVERS[1],
   };
-  const sample = (template = o.template, paper = o.paper) => ({ template, paper, h: heightOf(o.size, o.orient), elements: [] });
+  // start with the current page's size: a listed size of the same shape (A4 first), else "Angepasst"
+  const match = ['a4', ...Object.keys(SIZES).filter(k => k !== 'a4')].find(k => Math.abs(heightOf({ size: k, orient: o.orient }) - curH) <= 2);
+  if (match) o.size = match;
+  else { o.size = 'custom'; o.custom = o.orient === 'landscape' ? [Math.round(210 * curH / PAGE_W), 210] : [210, Math.round(210 * curH / PAGE_W)]; }
+  const sample = (template = o.template, paper = o.paper) => ({ template, paper, h: heightOf(o), elements: [] });
   const back = h('div', { class: 'backdrop' });
   const close = () => { document.removeEventListener('keydown', onKey); back.classList.add('closing'); setTimeout(() => back.remove(), 200); };
   const confirm = () => {
     if (o.tab === 'paper') {
       settings.lastTemplate = o.template; saveSettings();
-      insert([newPage(o.template, heightOf(o.size, o.orient), o.paper)]);
+      insert([newPage(o.template, heightOf(o), o.paper)]);
     } else {
       // cover page: the cover drawn as the page background
       // (filled with the cover colour first: the cover's rounded corners must not turn black in the JPEG)
-      const hh = heightOf(o.size, o.orient), cv = document.createElement('canvas'), page = document.createElement('canvas');
+      const hh = heightOf(o), cv = document.createElement('canvas'), page = document.createElement('canvas');
       renderCover(cv, o.cover, PAGE_W, hh);
       page.width = PAGE_W; page.height = hh;
       const x = page.getContext('2d');
@@ -134,18 +144,49 @@ function templateWindow(ctx, cur, insert) {
     }
     close();
   };
-  const onKey = e => { if (e.key === 'Escape') close(); else if (e.key === 'Enter') confirm(); };
+  // Escape / Enter belong to an open size or colour menu first
+  const onKey = e => { if (document.querySelector('.popover') || e.target.tagName === 'INPUT') return; if (e.key === 'Escape') close(); else if (e.key === 'Enter') confirm(); };
   document.addEventListener('keydown', onKey);
 
   const top = h('div', { class: 'tw-top' }), gallery = h('div', { class: 'tw-gallery' });
   const tabs = h('div', { class: 'tw-tabs' });
-  const sizeLabel = () => `${SIZES[o.size][0]}, ${o.orient === 'portrait' ? 'Hochformat' : 'Querformat'}`;
+  const sizeName = () => (o.size === 'custom' ? `${o.custom[0]} × ${o.custom[1]} mm` : SIZES[o.size][0].replace('-Format', ''));
+  const sizeLabel = () => `${sizeName()}, ${o.orient === 'portrait' ? 'Hochformat' : 'Querformat'}`;
+
+  // Size window: portrait / landscape, the paper sizes, and "Angepasst" (own width × height in mm)
+  function sizePopover(anchor) {
+    const body = h('div', { class: 'sz' });
+    const draw = (customOpen = false) => {
+      const seg = h('div', { class: 'sz-seg' }, [['portrait', 'Hochformat'], ['landscape', 'Querformat']].map(([k, l]) =>
+        h('button', { class: o.orient === k ? 'on' : '', onclick: () => { o.orient = k; render(); draw(customOpen); } }, l)));
+      if (customOpen) {
+        const num = (v, i) => h('input', {
+          class: 'field sz-num', type: 'number', min: 20, max: 2000, step: 1, value: v, inputmode: 'numeric',
+          onchange: e => { const n = Math.round(+e.target.value); if (n >= 20 && n <= 2000) { o.custom = o.custom.slice(); o.custom[i] = n; o.size = 'custom'; render(); } },
+        });
+        body.replaceChildren(seg, h('div', { class: 'sz-list' },
+          h('button', { class: 'sz-row', onclick: () => draw(false) }, icon('chevronLeft', 18), h('span', {}, 'Größen')),
+          h('label', { class: 'sz-row' }, h('span', {}, 'Breite (mm)'), num(o.custom[0], 0)),
+          h('label', { class: 'sz-row' }, h('span', {}, 'Höhe (mm)'), num(o.custom[1], 1))),
+          h('div', { class: 'sz-hint' }, 'Maße im Hochformat; Querformat dreht die Seite.'));
+        return;
+      }
+      body.replaceChildren(seg, h('div', { class: 'sz-list' },
+        ...Object.entries(SIZES).map(([k, [label]]) => h('button', {
+          class: 'sz-row', onclick: () => { o.size = k; render(); closePopover(); },
+        }, h('span', {}, label), o.size === k ? icon('check', 20) : null)),
+        h('button', { class: 'sz-row', onclick: () => { if (o.size !== 'custom') { o.custom = dimsOf(o).slice(); o.size = 'custom'; render(); } draw(true); } },
+          h('span', {}, 'Angepasst'), o.size === 'custom' ? h('span', { class: 'sz-val' }, `${o.custom[0]} × ${o.custom[1]} mm`) : null, icon('chevronRight', 18))));
+    };
+    draw(o.size === 'custom');
+    popover(anchor, body, { className: 'sz-pop' });
+  }
   const field = (label, value, onclick) => h('button', { class: 'tw-field', onclick }, h('span', {}, label), h('span', { class: 'tw-val' }, value, icon('chevronDown', 16)));
 
   function render() {
     tabs.replaceChildren(...[['cover', 'Umschlag'], ['paper', 'Papier']].map(([k, l]) => h('button', { class: o.tab === k ? 'on' : '', onclick: () => { o.tab = k; render(); } }, l)));
     const preview = h('canvas');
-    if (o.tab === 'paper') renderThumb(preview, sample(), 240); else renderCover(preview, o.cover, 240, Math.round(240 * heightOf(o.size, o.orient) / PAGE_W));
+    if (o.tab === 'paper') renderThumb(preview, sample(), 240); else renderCover(preview, o.cover, 240, Math.round(240 * heightOf(o) / PAGE_W));
     const swatch = h('i', { class: 'tw-dot', style: { background: PAPERS[o.paper].color } });
     top.replaceChildren(
       h('div', { class: 'tw-preview' },
@@ -154,10 +195,7 @@ function templateWindow(ctx, cur, insert) {
       h('div', { class: 'tw-settings' },
         h('div', { class: 'tw-cap' }, o.tab === 'paper' ? 'PAPIER-VORLAGEN' : 'UMSCHLAG'),
         h('div', { class: 'tw-group' },
-          field('Größe', sizeLabel(), e => menu(e.currentTarget, [['a4', 'portrait'], ['a4', 'landscape'], ['letter', 'portrait'], ['letter', 'landscape']].map(([s, or]) => ({
-            label: `${SIZES[s][0]}, ${or === 'portrait' ? 'Hochformat' : 'Querformat'}`, checked: o.size === s && o.orient === or,
-            action: () => { o.size = s; o.orient = or; render(); },
-          })))),
+          field('Größe', sizeLabel(), e => sizePopover(e.currentTarget)),
           o.tab === 'paper' ? field('Farbe', [swatch, PAPER_NAMES[o.paper]], e => menu(e.currentTarget, PAPER_ORDER.map(k => ({
             label: PAPER_NAMES[k], swatch: PAPERS[k].color, action: () => { o.paper = k; render(); },
           })))) : null)));
@@ -177,7 +215,7 @@ function templateWindow(ctx, cur, insert) {
         }))]));
     } else {
       gallery.replaceChildren(h('div', { class: 'tw-h1' }, 'Umschläge'), h('div', { class: 'tw-grid' + land }, COVERS.map((c, i) => {
-        const cv = h('canvas'); renderCover(cv, c, 200, Math.round(200 * heightOf(o.size, o.orient) / PAGE_W));
+        const cv = h('canvas'); renderCover(cv, c, 200, Math.round(200 * heightOf(o) / PAGE_W));
         const active = o.cover === c;
         return h('div', { class: 'tw-item' + (active ? ' active' : '') },
           h('button', { class: 'tw-art', 'aria-label': COVER_NAMES[i], onclick: () => { o.cover = c; render(); } }, cv, active ? h('span', { class: 'tw-check' }, icon('check', 16)) : null),

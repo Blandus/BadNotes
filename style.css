@@ -264,7 +264,7 @@ svg { display: block; flex: none; }
 
 /* ---------- Popovers, menus, sheets ---------- */
 .popover {
-  position: fixed; z-index: 50; min-width: 220px; max-width: min(420px, calc(100vw - 16px));
+  position: fixed; z-index: 75; /* above dialogs (60), so their menus show */ min-width: 220px; max-width: min(420px, calc(100vw - 16px));
   background: var(--surface); border-radius: 12px; box-shadow: var(--shadow-md);
   border: 1px solid var(--sep); padding: 6px;
   animation: pop-in .16s var(--ease);
@@ -416,9 +416,10 @@ svg { display: block; flex: none; }
 /* ---------- Editor ---------- */
 #editor { flex-direction: column; background: var(--canvas-bg); }
 /* Document tabs: quiet strip above the header */
-.tabbar { display: flex; align-items: flex-end; height: 38px; flex: none; padding: env(safe-area-inset-top) 10px 0; background: var(--sidebar); border-bottom: 1px solid var(--sep); }
+/* the iPad status bar area (safe-area inset) is added on top of the bar, not taken from it */
+.tabbar { display: flex; align-items: flex-end; height: calc(38px + env(safe-area-inset-top)); flex: none; padding: env(safe-area-inset-top) 10px 0; background: var(--sidebar); border-bottom: 1px solid var(--sep); }
 .tabbar[hidden] { display: none; }
-.tabs { display: flex; gap: 4px; overflow-x: auto; flex: 1; scrollbar-width: none; }
+.tabs { display: flex; align-items: flex-end; gap: 4px; overflow-x: auto; overflow-y: hidden; flex: 1; align-self: stretch; scrollbar-width: none; }
 .tab {
   display: flex; align-items: center; max-width: 220px; min-width: 110px; height: 31px;
   border-radius: 10px 10px 0 0; padding-left: 12px; color: var(--text-2); font-size: 12.5px; font-weight: 500;
@@ -435,6 +436,7 @@ svg { display: block; flex: none; }
   display: flex; align-items: center; gap: 8px; height: 52px; flex: none; padding: 0 10px;
   background: var(--ed-bar); color: var(--ed-bar-icon); border-bottom: 1px solid var(--sep);
 }
+/* without tabs (or in a text document) the header itself starts below the status bar */.tabbar[hidden] + .toolbar, .textdoc-view > .toolbar { height: calc(52px + env(safe-area-inset-top)); padding-top: env(safe-area-inset-top); }
 .tb-group { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
 .tb-group.right { justify-content: flex-end; flex: none; }
 .tb-group-inner, .undo-group { display: flex; align-items: center; gap: 2px; }
@@ -861,3 +863,38 @@ button.tw-dot.on { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--mist)
   .tw-preview { width: auto; }
   .tw-gallery, .tw-top { padding-left: 16px; padding-right: 16px; }
 }
+
+/* Paper size window (template window → Größe) */
+.popover.sz-pop { padding: 0; border-radius: 20px; }
+.sz { width: 340px; max-width: calc(100vw - 24px); }
+.sz-seg { display: flex; justify-content: center; gap: 2px; margin: 12px auto; padding: 3px; width: max-content; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--sep); }
+.sz-seg button { padding: 8px 16px; border-radius: 999px; font-size: 14px; font-weight: 500; color: var(--text-2); transition: background var(--dur) ease, color var(--dur) ease; }
+.sz-seg button.on { background: var(--surface-3); color: var(--text); }
+.sz-list { margin: 0 12px 12px; background: var(--surface-2); border: 1px solid var(--sep); border-radius: 14px; overflow: hidden; }
+.sz-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 13px 16px; font-size: 15px; text-align: left; color: var(--text); transition: background var(--dur) ease; }
+.sz-row + .sz-row { border-top: 1px solid var(--sep); }
+button.sz-row:hover { background: var(--surface-3); }
+.sz-row > span:first-child { flex: 1; }
+.sz-row svg { color: var(--accent); }
+.sz-row .sz-val { color: var(--text-2); font-size: 13px; }
+.sz-num { width: 96px; height: 36px; font-size: 15px; text-align: right; }
+.sz-hint { font-size: 12px; color: var(--text-2); padding: 0 18px 14px; }
+
+/* Google sign-in and account (sidebar, settings) */
+.sb-signin {
+  flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 10px; height: 40px; padding: 0 12px;
+  border-radius: 999px; background: var(--surface); border: 1px solid var(--sep-strong); color: var(--text);
+  font-size: 13.5px; font-weight: 600; white-space: nowrap; transition: background var(--dur) ease, box-shadow var(--dur) ease;
+}
+.sb-signin:hover { background: var(--surface-2); box-shadow: var(--shadow-sm); }
+.sb-signin.wide { width: 100%; height: 44px; font-size: 15px; margin: 6px 0 8px; }
+.sb-avatar { width: 30px; height: 30px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center; background: var(--sage); color: #fff; font-size: 13px; font-weight: 600; }
+.sb-avatar.big { width: 40px; height: 40px; font-size: 16px; }
+.sb-acc { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.sb-acc b { font-size: 12.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-acc span { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acc-box { padding: 10px 12px; }
+.acc-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.acc-text { flex: 1; min-width: 0; }
+.acc-text .hint { overflow: hidden; text-overflow: ellipsis; }
+.about a { color: var(--accent); }

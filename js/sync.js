@@ -12,15 +12,24 @@ export function configureSync(opts) { beforeSync = opts.beforeSync; isLocked = o
 
 function setStatus(msg) { settings.syncStatus = msg; emit('sync', msg); }
 
+// ---------- Sign-in ----------
+// One OAuth client for everyone: it only identifies the app (allowed origin: the GitHub Pages
+// site). Each person signs in with their own Google account and Folio gets a token for *their*
+// Drive, limited to files Folio itself created (drive.file). No server; tokens last ~1 hour.
+// settings.driveUsed = signed in on this device; settings.account = { email, name }.
+export const CLIENT_ID = '498289443227-8pajeudml34vv14m2u7gc6t6li4o0n35.apps.googleusercontent.com';
+const clientId = () => CLIENT_ID;
+export const signedIn = () => !!settings.driveUsed;
+
 function getToken(interactive) {
   return new Promise((res, rej) => {
     if (tokenValid()) return res(drive.token);
-    if (!interactive) return rej(new Error('Zum Verbinden auf Sync tippen'));
-    if (!settings.clientId) return rej(new Error('Client-ID in den Einstellungen fehlt'));
+    if (!interactive) return rej(new Error('Zum Verbinden antippen'));
     if (!window.google?.accounts?.oauth2) return rej(new Error('Google-Login nicht geladen (offline?)'));
     const tc = google.accounts.oauth2.initTokenClient({
-      client_id: settings.clientId,
+      client_id: clientId(),
       scope: 'https://www.googleapis.com/auth/drive.file',
+      ...(settings.account?.email ? { login_hint: settings.account.email } : {}),
       callback: r => {
         if (r.error) return rej(new Error(r.error));
         drive.token = r.access_token;
@@ -32,6 +41,31 @@ function getToken(interactive) {
     tc.requestAccessToken({ prompt: settings.driveUsed ? '' : 'consent' });
   });
 }
+
+// "Mit Google anmelden": consent once, remember the account, sync right away.
+export async function signIn() {
+  try {
+    await getToken(true);
+    settings.driveUsed = true;
+    const about = await (await gapi('about?fields=user(emailAddress,displayName)')).json();
+    settings.account = { email: about.user?.emailAddress || '', name: about.user?.displayName || '' };
+    saveSettings(); emit('account');
+    await sync(false);
+  } catch (err) { setStatus('⚠ Anmeldung: ' + err.message); }
+}
+export function signOut() {
+  if (drive.token && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(drive.token, () => {});
+  drive.token = null; drive.exp = 0;
+  settings.driveUsed = false; settings.account = null; settings.syncStatus = '';
+  saveSettings(); emit('account'); setStatus('');
+}
+// After the ~1 h token expires, the next tap anywhere renews it (Google needs a user gesture for
+// its sign-in window; with consent already given it closes by itself) and syncs.
+document.addEventListener('click', () => {
+  if (!signedIn() || tokenValid() || drive.busy || drive.renewing) return;
+  drive.renewing = true;
+  getToken(true).then(() => sync(false)).catch(() => {}).finally(() => { drive.renewing = false; });
+}, true);
 
 async function gapi(path, opts = {}) {
   const url = path.startsWith('http') ? path : 'https://www.googleapis.com/drive/v3/' + path;
@@ -209,6 +243,9 @@ export async function sync(interactive) {
   try {
     await getToken(interactive);
     if (!settings.driveUsed) { settings.driveUsed = true; saveSettings(); }
+    if (!settings.account) { // signed in with an older version: look the account up once
+      try { const u = (await (await gapi('about?fields=user(emailAddress,displayName)')).json()).user; settings.account = { email: u?.emailAddress || '', name: u?.displayName || '' }; saveSettings(); emit('account'); } catch {}
+    }
     setStatus('Synchronisiere…');
     await beforeSync();
     const folders = await findFolders();
