@@ -704,13 +704,43 @@ function widthSlots(cfg, max, scale) {
     class: 'widthbtn' + (cfg.width === i ? ' active' : ''), title: cfg.width === i ? 'Stärke anpassen' : 'Stärke',
     onclick: e => {
       if (cfg.width !== i) { cfg.width = i; saveTools(); return renderOptions(); }
-      const label = h('span', { class: 'mono' }, w.toFixed(1));
+      const min = max / 20;
+      const format = n => String(Number(n.toFixed(2)));
+      const update = n => {
+        cfg.widths[i] = n;
+        range.value = n;
+        saveTools(); renderOptionsKeepPopover();
+      };
+      const value = h('input', {
+        type: 'text', inputmode: 'decimal', class: 'width-value mono', value: format(w),
+        'aria-label': 'Stärke als Zahlenwert', title: 'Stärke eingeben (' + format(min) + '–' + max + ')',
+        onfocus: ev => ev.target.select(),
+        oninput: ev => {
+          // A text field accepts decimal commas on the German iPad keyboard, too.
+          const raw = ev.target.value.trim().replace(',', '.');
+          const n = Number(raw);
+          const valid = /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw) && Number.isFinite(n) && n >= min && n <= max;
+          ev.target.setCustomValidity(valid ? '' : 'Wert zwischen ' + format(min) + ' und ' + max + ' eingeben.');
+          if (valid) update(Math.round(n * 100) / 100);
+        },
+        onblur: ev => {
+          ev.target.value = format(cfg.widths[i]);
+          ev.target.setCustomValidity('');
+        },
+        onkeydown: ev => {
+          if (ev.key === 'Enter') { ev.preventDefault(); ev.target.blur(); }
+        },
+      });
+      const range = h('input', {
+        type: 'range', min, max, step: 0.01, value: w, 'aria-label': 'Stärke',
+        oninput: ev => {
+          update(+ev.target.value);
+          value.value = format(cfg.widths[i]);
+          value.setCustomValidity('');
+        },
+      });
       popover(e.currentTarget, h('div', { class: 'widthpop' },
-        h('div', { class: 'pop-title' }, 'Stärke'),
-        h('input', {
-          type: 'range', min: max / 20, max, step: 0.5, value: w,
-          oninput: ev => { cfg.widths[i] = +ev.target.value; label.textContent = (+ev.target.value).toFixed(1); saveTools(); renderOptionsKeepPopover(); },
-        }), label));
+        h('div', { class: 'pop-title' }, 'Stärke'), range, value));
     },
   }, h('span', { class: 'width-dot', style: { width: Math.max(3, Math.min(22, w * scale)) + 'px', height: Math.max(3, Math.min(22, w * scale)) + 'px' } }))));
 }
@@ -734,7 +764,7 @@ function presetsButton(kind) {
       const cfg = T[kind];
       menu(e.currentTarget, [
         ...list.map(p => ({
-          label: `${p.pen ? { fountain: 'Füller', ball: 'Kugelschreiber', brush: 'Pinsel' }[p.pen] + ' · ' : ''}${p.width.toFixed(1)}`,
+          label: `${p.pen ? { fountain: 'Füller', ball: 'Kugelschreiber', brush: 'Pinsel' }[p.pen] + ' · ' : ''}${Number(p.width.toFixed(2))}`,
           swatch: p.color,
           action: () => {
             let ci = cfg.colors.findIndex(c => c.toLowerCase() === p.color.toLowerCase());

@@ -633,7 +633,14 @@ svg { display: block; flex: none; }
 .custom-color .field { height: 36px; font-size: 14px; }
 .widthpop { display: flex; align-items: center; gap: 10px; padding: 0 8px 8px; flex-wrap: wrap; width: 240px; }
 .widthpop .pop-title { width: 100%; padding-bottom: 0; }
-.widthpop input { flex: 1; accent-color: var(--accent); }
+.widthpop input[type="range"] { flex: 1; min-width: 0; width: 0; accent-color: var(--accent); }
+.widthpop .width-value {
+  flex: none; width: 64px; height: 36px; padding: 4px 6px; text-align: center;
+  font-size: 16px; color: var(--text); background: var(--surface-2);
+  border: 1px solid var(--sep-strong); border-radius: 8px; outline: none;
+}
+.widthpop .width-value:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.widthpop .width-value:invalid { border-color: var(--danger); }
 .addpage { width: 400px; max-width: calc(100vw - 32px); padding: 0 6px 6px; }
 .addpage .tmpl-grid { grid-template-columns: repeat(3, 1fr); }
 .addpage-btns { display: flex; gap: 8px; justify-content: center; margin-top: 14px; }

@@ -45,6 +45,12 @@ export function initTools() {
   const blockNative = e => { if (!e.target.closest('button, textarea, input, .sel-menu, .lasso-hint, .shape-handle')) e.preventDefault(); };
   sc.addEventListener('touchstart', blockNative, { passive: false });
   sc.addEventListener('touchmove', blockNative, { passive: false });
+  // Any new input stops the glide, including toolbar touches and pencil contact.
+  document.addEventListener('pointerdown', stopMomentum, true);
+  document.addEventListener('wheel', stopMomentum, { passive: true });
+  document.addEventListener('keydown', stopMomentum);
+  document.addEventListener('visibilitychange', stopMomentum);
+  window.addEventListener('resize', stopMomentum);
 }
 
 // Time of the last pen activity: touches shortly after it are the writing hand, not gestures.
@@ -190,6 +196,7 @@ function recognize(points) {
 
 // ---------- Pointer routing ----------
 function onDown(e) {
+  stopMomentum();
   if (e.target.closest('.sel-menu, .text-editor, .lasso-hint')) return;
   removeLassoHint();
   // Shape corner handles can be dragged with pen, finger or mouse.
@@ -202,6 +209,7 @@ function onDown(e) {
     tap = touches.size === 1 && !palmLikely() ? { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() } : null;
     if (settings.fingerDraw && touches.size === 1 && !drawing) return start(e);
     if (drawing?.touch) cancelDrawing();
+    try { sc.setPointerCapture(e.pointerId); } catch {}
     startGesture();
     return;
   }
@@ -280,6 +288,7 @@ function onMove(e) {
     sc.scrollTop -= g.cy - gesture.cy;
     gesture.cx = g.cx; gesture.cy = g.cy;
     if (touches.size > 1 && gesture.d > 0) setZoom(gesture.zoom * g.d / gesture.d, g.cx, g.cy);
+    if (touches.size === 1 && !gesture.pinched) sampleScroll(gesture);
   } else if (e.pointerType !== 'touch' && ed.tool === 'eraser' && e.target.closest?.('.page')) {
     hoverCursor = [e.clientX, e.clientY]; drawOverlay();
   }
@@ -287,11 +296,13 @@ function onMove(e) {
 let hoverCursor = null;
 
 function onUp(e, ok) {
+  const released = ok && touches.has(e.pointerId) && touches.size === 1 && !drawing ? gesture : null;
   if (e.pointerType === 'pen') lastPen = performance.now();
   // Safari cancels the pencil's pointer when it thinks the palm started a gesture; the ink
   // drawn up to that point is real, so a cancelled pen stroke is kept, not thrown away.
   if (drawing && e.pointerId === drawing.id) finish(ok || (drawing.kind === 'stroke' && !drawing.touch));
   if (touches.delete(e.pointerId)) startGesture();
+  if (released) startMomentum(released);
   if (ok && e.pointerType === 'touch') detectDoubleTap(e);
 }
 
@@ -577,7 +588,59 @@ function gestureState() {
   const d = pts.length > 1 ? Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) : 0;
   return { cx, cy, d };
 }
-function startGesture() { gesture = touches.size ? { ...gestureState(), zoom: ed.zoom } : null; }
+function startGesture() {
+  // Once a second finger joins, suppress inertia until the whole pinch gesture ends.
+  const pinched = touches.size > 1 || !!gesture?.pinched;
+  gesture = touches.size ? { ...gestureState(), zoom: ed.zoom, pinched, samples: [] } : null;
+  if (gesture) sampleScroll(gesture);
+}
+
+// ---------- Momentum scrolling ----------
+// Native touch scrolling is disabled to keep palm rejection and pencil strokes reliable.
+// Continue moving only the editor pane after a flick; the document stays fixed on iPadOS.
+let scrollFrame = null;
+const SCROLL_DECAY_MS = 325;
+function stopMomentum() {
+  if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
+  scrollFrame = null;
+}
+function sampleScroll(g, now = performance.now()) {
+  g.samples.push({ t: now, x: sc.scrollLeft, y: sc.scrollTop });
+  while (g.samples.length > 1 && g.samples[0].t < now - 100) g.samples.shift();
+}
+function startMomentum(g) {
+  stopMomentum();
+  if (g.pinched || palmLikely() || !ed.doc || $('#editor').hidden) return;
+  sampleScroll(g);
+  const first = g.samples[0], last = g.samples[g.samples.length - 1];
+  const dt = last.t - first.t;
+  if (dt < 8 || Math.hypot(last.x - first.x, last.y - first.y) < 8) return;
+  const cap = v => Math.max(-4.5, Math.min(4.5, v));
+  let vx = cap((last.x - first.x) / dt), vy = cap((last.y - first.y) / dt);
+  let x = sc.scrollLeft, y = sc.scrollTop, previous = performance.now();
+  const doc = ed.doc;
+  function step(now) {
+    scrollFrame = null;
+    if (document.hidden || $('#editor').hidden || ed.doc !== doc || touches.size || palmLikely()) return;
+    // Integrate by elapsed time, equally on 60 Hz and 120 Hz displays.
+    const elapsed = now - previous;
+    if (elapsed > 100) return; // don't jump after a suspended or heavily stalled frame
+    previous = now;
+    const decay = Math.exp(-elapsed / SCROLL_DECAY_MS);
+    x += vx * SCROLL_DECAY_MS * (1 - decay);
+    y += vy * SCROLL_DECAY_MS * (1 - decay);
+    const maxX = Math.max(0, sc.scrollWidth - sc.clientWidth);
+    const maxY = Math.max(0, sc.scrollHeight - sc.clientHeight);
+    if (x <= 0 || x >= maxX) vx = 0;
+    if (y <= 0 || y >= maxY) vy = 0;
+    x = Math.max(0, Math.min(maxX, x));
+    y = Math.max(0, Math.min(maxY, y));
+    sc.scrollLeft = x; sc.scrollTop = y;
+    vx *= decay; vy *= decay;
+    if (Math.hypot(vx, vy) > 0.02) scrollFrame = requestAnimationFrame(step);
+  }
+  if (Math.hypot(vx, vy) > 0.08) scrollFrame = requestAnimationFrame(step);
+}
 
 // ---------- Pen, highlighter, shapes ----------
 // Live strokes go onto the screen-sized #ink canvas at full device resolution.
