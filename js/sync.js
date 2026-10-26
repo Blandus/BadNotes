@@ -1,7 +1,9 @@
-// Google Drive sync. Every record (notebook or folder) is stored as <id>.json in a
-// "Folio" folder (older installs: "BadNotes" / "Notizen-App"); per record the newer version (by `updated`) wins.
-import { store, settings, saveSettings, emit } from './store.js';
+// Google Drive sync. Every record (notebook, text document, folder) is stored as <id>.json in a
+// "Folio" folder (older installs: "BadNotes" / "Notizen-App"). Per record, changes made on this
+// device and on Drive since the last common version (the "base") are merged (merge.js).
+import { store, settings, saveSettings, emit, migrate } from './store.js';
 import { uid } from './util.js';
+import { merge3, mergeable } from './merge.js';
 
 const drive = { token: null, exp: 0, busy: false };
 export const tokenValid = () => drive.token && Date.now() < drive.exp - 60000;
@@ -77,9 +79,12 @@ async function gapi(path, opts = {}) {
 // Rules:
 // - Exactly one Drive file per record (named <id>.json). If copies exist, the newest wins and
 //   the others are moved to Drive's trash.
-// - A record is uploaded only if its edit time ("updated") is newer than the copy on Drive —
-//   re-checked right before writing, so a newer upload from another device is never overwritten.
-// - Downloads likewise only replace local data with a newer version.
+// - Each device keeps, per record, the version it last agreed on with Drive (base; its `updated`
+//   is the version marker, stored in the file's appProperties too).
+//   Changed only here → upload; changed only on Drive → download; changed on both → three-way
+//   merge, result stored and uploaded; without a base (first sync of a record) the newer wins.
+// - An upload only happens if the Drive copy is still the one this run read (re-checked right
+//   before writing); otherwise the next run merges again. Records being edited are skipped.
 // - Duplicate folders (same name, same place) and identical duplicate notebooks are merged.
 const enc = encodeURIComponent;
 const rUpd = f => +(f?.appProperties?.updated || 0);
@@ -125,12 +130,14 @@ function pickNewest(files) {
   return { byId, dupes };
 }
 
-// Uploads rec only if it is newer than the current Drive copy. Looks the copy up again right
-// before writing (another device may have written in the meantime). Returns true if written.
-async function pushIfNewer(rec, folders) {
+// Uploads rec only if the Drive copy is still the version this sync run started from
+// (expected: its `updated`, or null for "no copy yet"). Looks the copy up again right before
+// writing; if another device wrote in the meantime, nothing is written and the next run merges.
+// Returns true if written.
+async function pushIfUnchanged(rec, folders, expected) {
   const { byId } = pickNewest(await listFiles(`name='${rec.id}.json' and ${inFolders(folders)} and trashed=false`));
   const cur = byId.get(rec.id);
-  if (cur && rUpd(cur) >= rec.updated) return false;
+  if (cur && rUpd(cur) !== expected) return false;
   const meta = cur
     ? { appProperties: { updated: String(rec.updated) } }
     : { name: rec.id + '.json', parents: [folders[0]], appProperties: { updated: String(rec.updated) } };
@@ -253,27 +260,61 @@ export async function sync(interactive) {
     const { byId: remote, dupes } = pickNewest((await listFiles(`${inFolders(folders)} and trashed=false`)).filter(f => f.name.endsWith('.json')));
 
     const local = new Map((await store.all()).map(n => [n.id, n]));
-    let down = 0, up = 0;
-    // Download whatever is newer on Drive.
-    for (const [id, f] of remote) {
-      const l = local.get(id);
-      if (l && rUpd(f) <= l.updated) continue;
-      if (isLocked(id)) continue;
-      const rec = await (await gapi(`files/${f.id}?alt=media`)).json();
-      if (local.get(id) && rec.updated <= local.get(id).updated) continue; // file content older than its label
-      await store.put(rec); local.set(id, rec); down++;
+    const bases = new Map((await store.allBases()).map(b => [b.id, b]));
+    const remoteUpd = new Map([...remote].map(([id, f]) => [id, rUpd(f)]));
+    let down = 0, up = 0, mergedN = 0, conflictN = 0;
+    const download = async f => migrate(await (await gapi(`files/${f.id}?alt=media`)).json());
+    // local copy still the one read at the start? (an edit in the meantime is handled next run)
+    const untouched = async (id, l) => (await store.get(id))?.updated === l?.updated;
+    const push = async rec => {
+      if (!(await pushIfUnchanged(rec, folders, remoteUpd.has(rec.id) ? remoteUpd.get(rec.id) : null))) return false;
+      remoteUpd.set(rec.id, rec.updated); await store.putBase(rec); up++;
+      return true;
+    };
+    // Per record: what changed since the base (the version both sides last agreed on)?
+    for (const id of new Set([...remote.keys(), ...local.keys()])) {
+      const f = remote.get(id), l = local.get(id), b = bases.get(id);
+      const rU = f ? rUpd(f) : null;
+      if (l && f && l.updated === rU) { if (b?.updated !== rU) await store.putBase(l); continue; } // in step
+      let lChanged = !!l && (!b || l.updated !== b.updated);
+      let rChanged = !!f && (!b || rU !== b.updated);
+      // No base yet (first sync of this record with this version): nothing to merge against —
+      // as before, the newer version wins; from then on changes are merged.
+      if (!b && l && f) { lChanged = l.updated > rU; rChanged = !lChanged; }
+      if (!lChanged && !rChanged) continue;
+      if (isLocked(id)) continue; // being edited right now: next run
+      if (!lChanged) { // only Drive changed → take it
+        const rec = await download(f);
+        if (!(await untouched(id, l))) continue;
+        await store.put(rec); await store.putBase(rec); local.set(id, rec); down++;
+        emit('remote', id);
+        continue;
+      }
+      if (!rChanged) { await push(l); continue; } // only here changed → upload
+      // Both changed: merge against the base.
+      const rec = await download(f);
+      let result;
+      if (mergeable(b) && mergeable(l) && mergeable(rec)) {
+        const { rec: m, notes } = merge3(b, l, rec);
+        m.updated = Math.max(Date.now(), l.updated + 1, rU + 1);
+        result = m; conflictN += notes.length;
+      } else {
+        // cannot be merged item by item: keep this version, add the other one as a separate copy
+        const copy = { ...structuredClone(rec), id: uid(), name: `${rec.name || 'Dokument'} (Konflikt-Kopie)`, updated: Date.now() };
+        await store.put(copy); local.set(copy.id, copy); await push(copy);
+        result = { ...l, updated: Math.max(Date.now(), rU + 1), conflicts: [...(l.conflicts || []), { at: Date.now(), text: `Auf zwei Geräten geändert – die andere Fassung liegt als „${copy.name}“ daneben.` }] };
+        conflictN++;
+      }
+      if (!(await untouched(id, l))) continue;
+      await store.put(result); local.set(id, result); mergedN++; down++;
       emit('remote', id);
-    }
-    // Upload whatever is newer here (checked again against Drive right before writing).
-    for (const [id, l] of local) {
-      if (remote.has(id) && rUpd(remote.get(id)) >= l.updated) continue;
-      if (await pushIfNewer(l, folders)) up++;
+      await push(result);
     }
     // Merge duplicates (e.g. sample notebooks created separately on two devices) and share the result.
     const merged = mergeDuplicates([...local.values()]);
     if (merged.length) {
       await store.putMany(merged);
-      for (const r of merged) { emit('remote', r.id); if (await pushIfNewer(r, folders)) up++; }
+      for (const r of merged) { emit('remote', r.id); await push(r); }
     }
     // Older duplicate copies of a file go to Drive's trash.
     for (const d of dupes) if (rUpd(d) <= rUpd(remote.get(recId(d)))) await trash(d.id);
@@ -285,7 +326,9 @@ export async function sync(interactive) {
     }
     const time = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
     const fixed = merged.length ? ` · ${merged.filter(r => r.deleted).length} Duplikat(e) zusammengeführt` : '';
-    setStatus(`Synchronisiert ${time}${up || down ? ` · ↑${up} ↓${down}` : ''}${fixed}${gnNote}`);
+    const mergeNote = mergedN ? ` · ${mergedN} zusammengeführt${conflictN ? `, ${conflictN} Konflikt-Hinweis(e)` : ''}` : '';
+    setStatus(`Synchronisiert ${time}${up || down ? ` · ↑${up} ↓${down}` : ''}${mergeNote}${fixed}${gnNote}`);
+    if (conflictN) emit('conflicts', conflictN);
   } catch (err) {
     setStatus('⚠ ' + err.message);
   } finally {

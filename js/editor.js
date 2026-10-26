@@ -5,7 +5,7 @@ import { renderPage, renderThumb, pageH, drawStroke, FONTS, fontFamily } from '.
 import { menu, popover, sheet, toast, segmented, closePopover, promptText, toggle } from './ui.js';
 import { exportPdf, exportPng, loadImageFile } from './pdf.js';
 import { suggestNames } from './suggest.js';
-import { renderLibrary, templatePicker, openSettings } from './library.js';
+import { renderLibrary, templatePicker, openSettings, showConflicts } from './library.js';
 import { clearSelection, renderSelection, finishText, selectIds, hasSelection, deleteSelection } from './tools.js';
 import { addPageMenu as openAddPage } from './addpage.js';
 
@@ -594,6 +594,11 @@ function buildToolbar() {
     h('button', { id: 'zoomLabel', class: 'mono', title: 'Auf 100 % zurücksetzen', onclick: () => setZoom(1) }, '100 %'),
     h('button', { title: 'Vergrößern', onclick: () => setZoom(ed.zoom * 1.2) }, icon('plus', 18)));
   $('#tbRight').append(
+    // only shown while the sync merge left notes on this document
+    tb('btnConflict', 'sync', 'Sync-Hinweise', async () => {
+      const doc = ed.doc;
+      if (await showConflicts(doc) && ed.doc === doc) { delete doc.conflicts; changed(); updateChrome(); }
+    }),
     tb('btnAdd', 'addPage', 'Seite hinzufügen', e => addPageMenu(e.currentTarget)),
     tb('btnShare', 'share', 'Exportieren', e => exportMenu(e.currentTarget)),
     tb('btnMore', 'moreCircle', 'Mehr', e => menu(e.currentTarget, [
@@ -636,6 +641,7 @@ export function updateChrome() {
   $('#btnUndo').disabled = !hist().undo.length;
   $('#btnRedo').disabled = !hist().redo.length;
   updateBookmarkBtn();
+  $('#btnConflict').hidden = !ed.doc.conflicts?.length;
   view.dataset.tool = ed.tool;
   document.querySelectorAll('.toolbtn').forEach(b => b.classList.toggle('active', b.dataset.tool === ed.tool));
 }
@@ -699,32 +705,35 @@ function colorPopover(anchor, cfg, i) {
   popover(anchor, body);
 }
 
+// Widths are stored in page units; shown and entered in millimetres (A4: 1000 units = 210 mm,
+// the same paper millimetres Goodnotes uses).
+const MM = PAGE_W / 210;
 function widthSlots(cfg, max, scale) {
   return h('div', { class: 'opt-group' }, cfg.widths.map((w, i) => h('button', {
-    class: 'widthbtn' + (cfg.width === i ? ' active' : ''), title: cfg.width === i ? 'Stärke anpassen' : 'Stärke',
+    class: 'widthbtn' + (cfg.width === i ? ' active' : ''), title: (w / MM).toFixed(2).replace('.', ',') + ' mm' + (cfg.width === i ? ' – anpassen' : ''),
     onclick: e => {
       if (cfg.width !== i) { cfg.width = i; saveTools(); return renderOptions(); }
-      const min = max / 20;
-      const format = n => String(Number(n.toFixed(2)));
+      const min = 0.1, maxMM = Math.round(max / MM * 10) / 10; // mm
+      const format = n => String(Number(n.toFixed(2))).replace('.', ',');
       const update = n => {
-        cfg.widths[i] = n;
+        cfg.widths[i] = Math.round(n * MM * 100) / 100;
         range.value = n;
         saveTools(); renderOptionsKeepPopover();
       };
       const value = h('input', {
-        type: 'text', inputmode: 'decimal', class: 'width-value mono', value: format(w),
-        'aria-label': 'Stärke als Zahlenwert', title: 'Stärke eingeben (' + format(min) + '–' + max + ')',
+        type: 'text', inputmode: 'decimal', class: 'width-value mono', value: format(w / MM),
+        'aria-label': 'Stärke in Millimetern', title: 'Stärke in mm eingeben (' + format(min) + '–' + format(maxMM) + ')',
         onfocus: ev => ev.target.select(),
         oninput: ev => {
           // A text field accepts decimal commas on the German iPad keyboard, too.
           const raw = ev.target.value.trim().replace(',', '.');
           const n = Number(raw);
-          const valid = /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw) && Number.isFinite(n) && n >= min && n <= max;
-          ev.target.setCustomValidity(valid ? '' : 'Wert zwischen ' + format(min) + ' und ' + max + ' eingeben.');
+          const valid = /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw) && Number.isFinite(n) && n >= min && n <= maxMM;
+          ev.target.setCustomValidity(valid ? '' : 'Wert zwischen ' + format(min) + ' und ' + format(maxMM) + ' mm eingeben.');
           if (valid) update(Math.round(n * 100) / 100);
         },
         onblur: ev => {
-          ev.target.value = format(cfg.widths[i]);
+          ev.target.value = format(cfg.widths[i] / MM);
           ev.target.setCustomValidity('');
         },
         onkeydown: ev => {
@@ -732,15 +741,15 @@ function widthSlots(cfg, max, scale) {
         },
       });
       const range = h('input', {
-        type: 'range', min, max, step: 0.01, value: w, 'aria-label': 'Stärke',
+        type: 'range', min, max: maxMM, step: 0.05, value: w / MM, 'aria-label': 'Stärke in Millimetern',
         oninput: ev => {
           update(+ev.target.value);
-          value.value = format(cfg.widths[i]);
+          value.value = format(cfg.widths[i] / MM);
           value.setCustomValidity('');
         },
       });
       popover(e.currentTarget, h('div', { class: 'widthpop' },
-        h('div', { class: 'pop-title' }, 'Stärke'), range, value));
+        h('div', { class: 'pop-title' }, 'Stärke (mm)'), range, value));
     },
   }, h('span', { class: 'width-dot', style: { width: Math.max(3, Math.min(22, w * scale)) + 'px', height: Math.max(3, Math.min(22, w * scale)) + 'px' } }))));
 }
@@ -886,7 +895,7 @@ export function renderOptions() {
     const cur = PENS.find(p => p[0] === cfg.pen) || PENS[0];
     parts = [
       h('button', { class: 'opt-drop', onclick: e => penPopover(e.currentTarget) }, icon(cur[2], 18), h('span', {}, cur[1]), icon('chevronDown', 14)),
-      colorSlots(cfg), sep(), widthSlots(cfg, 12, 2.6), sep(), presetsButton('pen'),
+      colorSlots(cfg), sep(), widthSlots(cfg, 24, 2.6), sep(), presetsButton('pen'),
     ];
   } else if (t === 'highlighter') {
     parts = [colorSlots(cfg), sep(), widthSlots(cfg, 50, 0.55), sep(),
@@ -907,7 +916,14 @@ export function renderOptions() {
       }, h('span', { class: 'eraser-dot', style: { width: 10 + i * 8 + 'px', height: 10 + i * 8 + 'px' } })))),
     ];
   } else if (t === 'lasso') {
-    parts = [h('span', { class: 'opt-label' }, 'Auswählen:'),
+    // free-hand or rectangle selection; both use the same filters and actions
+    const mode = cfg.mode === 'rect' ? 'rect' : 'free';
+    const modeBtn = (m, ic, label) => h('button', {
+      class: 'iconbtn' + (mode === m ? ' on' : ''), title: label, 'aria-label': label, 'aria-pressed': mode === m ? 'true' : 'false',
+      onclick: () => { cfg.mode = m; saveTools(); renderOptions(); },
+    }, icon(ic, 20));
+    parts = [h('div', { class: 'opt-group' }, modeBtn('free', 'lasso', 'Freihand-Lasso'), modeBtn('rect', 'lassoRect', 'Rechteck-Auswahl')), sep(),
+      h('span', { class: 'opt-label' }, 'Auswählen:'),
       chip('Handschrift', cfg.strokes, () => { cfg.strokes = !cfg.strokes; saveTools(); renderOptions(); }),
       chip('Bilder', cfg.images, () => { cfg.images = !cfg.images; saveTools(); renderOptions(); }),
       chip('Text', cfg.text, () => { cfg.text = !cfg.text; saveTools(); renderOptions(); }),
@@ -970,7 +986,48 @@ function resizeSelectionText(size) {
   commit(page, page.elements.map(e => ed.sel.ids.has(e.id) && e.type === 'text' ? { ...e, size } : e));
 }
 
+// ---------- Tool details bar (dock) ----------
+// The details of the active tool (variants, colours, widths) live in their own bar so the main
+// tool row never changes. It docks at the top (horizontal) or at the left/right edge (vertical);
+// only its grip moves it, so using its buttons and sliders never drags it by accident.
+const dock = $('#optdock');
+function applyDock(where = settings.optDock || 'top') {
+  dock.classList.remove('top', 'left', 'right', 'dragging');
+  dock.style.left = dock.style.top = '';
+  dock.classList.add(where);
+  view.classList.toggle('dock-top', where === 'top');
+}
+function initDock() {
+  applyDock();
+  const grip = dock.querySelector('.optdock-grip');
+  grip.addEventListener('pointerdown', e => {
+    e.preventDefault(); e.stopPropagation();
+    try { grip.setPointerCapture(e.pointerId); } catch {}
+    const stage = dock.parentElement.getBoundingClientRect(), r = dock.getBoundingClientRect();
+    const dx = e.clientX - r.left, dy = e.clientY - r.top;
+    let moved = false;
+    const move = ev => {
+      if (!moved && Math.hypot(ev.clientX - e.clientX, ev.clientY - e.clientY) < 4) return;
+      moved = true;
+      dock.classList.add('dragging');
+      dock.style.left = (ev.clientX - stage.left - dx) + 'px'; dock.style.top = (ev.clientY - stage.top - dy) + 'px';
+    };
+    const up = ev => {
+      grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); grip.removeEventListener('pointercancel', up);
+      if (!moved) return applyDock();
+      // near the left / right edge → dock there (vertical), otherwise at the top (horizontal)
+      const x = ev.clientX - stage.left, edge = Math.min(120, stage.width * 0.18);
+      settings.optDock = x < edge ? 'left' : x > stage.width - edge ? 'right' : 'top';
+      saveSettings(); applyDock();
+    };
+    grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up); grip.addEventListener('pointercancel', up);
+  });
+  // touches on the bar must not reach the page (no drawing / scrolling underneath)
+  for (const t of ['pointerdown', 'touchstart']) dock.addEventListener(t, e => e.stopPropagation(), { passive: true });
+}
+
 export function initEditor() {
+  initDock();
   buildToolbar();
   selectTool(ed.tool);
 }

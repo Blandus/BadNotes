@@ -22,7 +22,7 @@ import { toast } from './ui.js';
 import { loadYjs } from './textdoc.js';
 
 // ---------- ZIP (central directory + DecompressionStream) ----------
-async function unzip(buf) {
+export async function unzip(buf) {
   const b = new Uint8Array(buf), dv = new DataView(buf);
   let eocd = -1;
   for (let i = b.length - 22; i >= Math.max(0, b.length - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }

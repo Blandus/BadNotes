@@ -8,6 +8,7 @@ import {
   scrollToPage, currentPage, toggleSearch, PALETTE,
 } from './editor.js';
 import { toast, popover, closePopover } from './ui.js';
+import { samplePiece, addSamplesToPath } from './ink.js';
 import { readRunsDom, renderRunsDom, selectionOffsets, setSelectionOffsets, styleAtPos, applyRange, normalize, runsOf } from './richtext.js';
 
 let overlay, octx;
@@ -76,28 +77,38 @@ function toPage(e, el, r = el.getBoundingClientRect(), raw = false) {
 // Input smoothing. Pointer positions arrive in whole screen pixels; when zoomed out one
 // pixel is a large step on the page, so a raw stroke is a staircase that stays visible
 // when zooming in later. Points are filtered (exponential smoothing) and points closer
-// than ~0.6 screen px are dropped, so the stored stroke is a smooth curve.
-// Stabilisation (0..1) lowers the filter factor: 0 → 0.45 (light), 1 → 0.08 (very steady, more lag).
+// than MIN_STEP screen px are dropped, so the stored stroke is a smooth curve.
+// Stabilisation (0..1) lowers the filter factor: 0 → 0.65 (light), 1 → 0.1 (very steady, more lag).
+const MIN_STEP = 0.4; // screen px
 function addPoint(d, raw) {
-  const a = 0.45 - 0.37 * d.smooth;
+  const a = 0.65 - 0.55 * d.smooth; // light: the finishing pass smooths, corners must survive
   const f = d.filt ? d.filt.map((v, i) => v + (raw[i] - v) * a) : raw;
   d.filt = f;
   d.lastRaw = raw;
   const p = d.stroke.points, last = p[p.length - 1];
-  const minDist = 0.6 * PAGE_W / d.rect.width;
+  const minDist = MIN_STEP * PAGE_W / d.rect.width;
   if (Math.hypot(f[0] - last[0], f[1] - last[1]) < minDist) return;
   p.push([r1(f[0]), r1(f[1]), Math.round(f[2] * 100) / 100]);
 }
-// On lift-off: catch up to the real end point, then a light [1,2,1] pass over the interior.
+// On lift-off: catch up to the real end point, then smooth the centre line. Rounds (o, s, e)
+// get several [1,2,1] passes; real corners (E, z, the tip of a v — the direction turns by more
+// than ~60° within a few points) are kept sharp.
 function finishPoints(d) {
   const p = d.stroke.points;
-  if (d.lastRaw && Math.hypot(d.lastRaw[0] - p[p.length - 1][0], d.lastRaw[1] - p[p.length - 1][1]) > 0.6 * PAGE_W / d.rect.width) {
+  if (d.lastRaw && Math.hypot(d.lastRaw[0] - p[p.length - 1][0], d.lastRaw[1] - p[p.length - 1][1]) > MIN_STEP * PAGE_W / d.rect.width) {
     p.push([r1(d.lastRaw[0]), r1(d.lastRaw[1]), Math.round(d.lastRaw[2] * 100) / 100]);
   }
   if (p.length < 4) return p;
+  const corner = new Uint8Array(p.length);
+  const K = 3; // compare directions over a few points (input is dense)
+  for (let i = K; i < p.length - K; i++) {
+    const ax = p[i][0] - p[i - K][0], ay = p[i][1] - p[i - K][1], bx = p[i + K][0] - p[i][0], by = p[i + K][1] - p[i][1];
+    const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
+    if (la && lb && (ax * bx + ay * by) / (la * lb) < 0.5) for (let j = i - 1; j <= i + 1; j++) corner[j] = 1; // > 60°
+  }
   let pts = p;
-  for (let pass = 0; pass < 2 + Math.round(d.smooth * 4); pass++) {
-    pts = pts.map((q, i) => i === 0 || i === pts.length - 1 ? q : [
+  for (let pass = 0; pass < 3 + Math.round(d.smooth * 4); pass++) {
+    pts = pts.map((q, i) => i === 0 || i === pts.length - 1 || corner[i] ? q : [
       r1((pts[i - 1][0] + 2 * q[0] + pts[i + 1][0]) / 4),
       r1((pts[i - 1][1] + 2 * q[1] + pts[i + 1][1]) / 4),
       Math.round((pts[i - 1][2] + 2 * q[2] + pts[i + 1][2]) / 4 * 100) / 100,
@@ -254,7 +265,11 @@ function onMove(e) {
     const d = drawing;
     if (d.kind === 'stroke') {
       if (d.straight) d.stroke.points = [d.stroke.points[0], toPage(e, d.el, d.rect)];
-      else if (!d.snapped) for (const ev of evs) addPoint(d, toPage(ev, d.el, d.rect, true));
+      else if (!d.snapped) {
+        for (const ev of evs) addPoint(d, toPage(ev, d.el, d.rect, true));
+        // where the Pencil is about to be: drawn as a provisional tip, never stored
+        d.pred = !d.redraw && e.getPredictedEvents ? e.getPredictedEvents().map(ev => toPage(ev, d.el, d.rect, true)) : null;
+      }
       if (!d.snapped) { queueLive(); watchHold(d, e); }
       else if (d.snapped.pts.length === 2 && !d.snapped.closed) {
         // Snapped line: keep holding and move to place the end point.
@@ -267,9 +282,14 @@ function onMove(e) {
       for (const ev of evs) eraseTo(toPage(ev, d.el, d.rect));
       d.cursor = [e.clientX, e.clientY]; drawOverlay();
     } else if (d.kind === 'lasso') {
-      for (const ev of evs) { d.path.push([ev.clientX, ev.clientY]); d.pagePts.push(toPage(ev, d.el)); }
+      if (T.lasso.mode === 'rect') {
+        // rectangle from the start point to the pointer (same selection rules as the free lasso)
+        const [x0, y0] = d.path[0], a = d.pagePts[0], b = toPage(e, d.el);
+        d.path = [[x0, y0], [e.clientX, y0], [e.clientX, e.clientY], [x0, e.clientY]];
+        d.pagePts = [a, [b[0], a[1]], b, [a[0], b[1]]];
+      } else for (const ev of evs) { d.path.push([ev.clientX, ev.clientY]); d.pagePts.push(toPage(ev, d.el)); }
       drawOverlay();
-    } else if (d.kind === 'move' || d.kind === 'resize') {
+    } else if (d.kind === 'move' || d.kind === 'resize' || d.kind === 'textwidth') {
       transformSelection(toPage(e, d.el));
     } else if (d.kind === 'laser') {
       for (const ev of evs) addLaser(ev);
@@ -496,7 +516,7 @@ function cancelDrawing() {
   const d = drawing; drawing = null; ed.busy = false;
   if (!d) return;
   clearTimeout(d.holdT);
-  if (d.kind === 'erase' || d.kind === 'move' || d.kind === 'resize' || d.kind === 'vertex') { d.page.elements = d.before; renderEl(d.el); renderSelection(); renderShapeHandles(); }
+  if (d.kind === 'erase' || d.kind === 'move' || d.kind === 'resize' || d.kind === 'textwidth' || d.kind === 'vertex') { d.page.elements = d.before; renderEl(d.el); renderSelection(); renderShapeHandles(); }
   else if (d.kind === 'stroke') { if (!pendingInk) clearInk(); }
   else renderEl(d.el);
   drawOverlay();
@@ -530,7 +550,7 @@ function finish(ok) {
   } else if (d.kind === 'erase') {
     d.page.elements = d.before;
     if (d.work !== d.before) commit(d.page, d.work);
-  } else if (d.kind === 'move' || d.kind === 'resize') {
+  } else if (d.kind === 'move' || d.kind === 'resize' || d.kind === 'textwidth') {
     const next = d.page.elements;
     d.page.elements = d.before;
     if (next !== d.before) commit(d.page, next);
@@ -702,19 +722,50 @@ function drawLive() {
     drawStroke(ictx, d.shapes ? { ...s, pen: 'ball' } : s);
     return;
   }
-  ictx.lineCap = 'round'; ictx.lineJoin = 'round'; ictx.strokeStyle = s.color; ictx.fillStyle = s.color;
+  ictx.fillStyle = s.color;
+  // Same midpoint-quadratic pieces and filled outline as drawStroke(), appended as points
+  // arrive; the width follows the pressure smoothly (it is smoothed again when finished).
+  const smp = [];
   if (!d.prevMid) {
-    ictx.beginPath(); ictx.arc(p[0][0], p[0][1], pieceWidth(s, p[0][2]) / 2, 0, Math.PI * 2); ictx.fill();
+    d.prevR = pieceWidth(s, p[0][2]) / 2;
     d.prevMid = p[0];
-  }
-  // Same midpoint-quadratic pieces as drawStroke(), appended as points arrive.
+    smp.push([p[0][0], p[0][1], d.prevR]);
+  } else smp.push([d.prevMid[0], d.prevMid[1], d.prevR]);
   for (let i = d.drawn; i < p.length - 1; i++) {
     const m = [(p[i][0] + p[i + 1][0]) / 2, (p[i][1] + p[i + 1][1]) / 2];
-    ictx.lineWidth = pieceWidth(s, p[i][2], m[0] - d.prevMid[0], m[1] - d.prevMid[1]);
-    ictx.beginPath(); ictx.moveTo(d.prevMid[0], d.prevMid[1]); ictx.quadraticCurveTo(p[i][0], p[i][1], m[0], m[1]); ictx.stroke();
-    d.prevMid = m;
+    const target = pieceWidth(s, p[i][2], m[0] - d.prevMid[0], m[1] - d.prevMid[1]) / 2;
+    const r = d.prevR + (target - d.prevR) * 0.35;
+    samplePiece(d.prevMid, p[i], m, d.prevR, r, smp);
+    d.prevMid = m; d.prevR = r;
+  }
+  if (smp.length > 1 || d.drawn === 1) {
+    const path = new Path2D();
+    addSamplesToPath(path, smp, 0);
+    ictx.fill(path, 'nonzero');
   }
   d.drawn = Math.max(d.drawn, p.length - 1);
+  drawPrediction(d);
+}
+
+// Predicted Pencil points (getPredictedEvents): a short provisional tip on the overlay layer,
+// replaced on every frame, so the line keeps up with the pen. Cleared when the stroke ends.
+function drawPrediction(d) {
+  const odpr = window.devicePixelRatio || 1;
+  octx.save();
+  octx.setTransform(1, 0, 0, 1, 0, 0);
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  const pts = d.pred;
+  if (pts?.length && d.prevMid) {
+    const s = d.rect.width / PAGE_W * odpr;
+    octx.setTransform(s, 0, 0, s, (d.rect.left - d.stage.left) * odpr, (d.rect.top - d.stage.top) * odpr);
+    const smp = [[d.prevMid[0], d.prevMid[1], d.prevR]];
+    for (const q of [d.stroke.points[d.stroke.points.length - 1], ...pts]) smp.push([q[0], q[1], d.prevR]);
+    const path = new Path2D();
+    addSamplesToPath(path, smp, 0);
+    octx.fillStyle = d.stroke.color;
+    octx.fill(path, 'nonzero');
+  }
+  octx.restore();
 }
 
 // Called once the committed stroke is on the page canvas.
@@ -771,6 +822,8 @@ function startLasso(base, pt, e) {
   if (ed.sel && ed.sel.page === base.page) {
     const box = unionBox(selEls());
     if (e.target.closest('.sel-handle')) { drawing = { ...base, kind: 'resize', before: base.page.elements, box, origin: pt }; return; }
+    const wh = e.target.closest('.sel-wh');
+    if (wh) { drawing = { ...base, kind: 'textwidth', side: wh.dataset.side, before: base.page.elements, origin: pt }; return; }
     if (inBox(pt, { x: box.x - 8, y: box.y - 8, w: box.w + 16, h: box.h + 16 })) { drawing = { ...base, kind: 'move', before: base.page.elements, origin: pt }; return; }
   }
   clearSelection();
@@ -780,6 +833,18 @@ function startLasso(base, pt, e) {
 function transformSelection(pt) {
   const d = drawing, ids = ed.sel.ids;
   let fn, k = 1;
+  if (d.kind === 'textwidth') {
+    // frame width of a text box: the text re-wraps, its size stays the same
+    const dx = pt[0] - d.origin[0], MIN = 40;
+    d.page.elements = d.before.map(e => {
+      if (!ids.has(e.id)) return e;
+      if (d.side === 'r') return { ...e, w: Math.round(Math.max(MIN, e.w + dx) * 10) / 10 };
+      const w = Math.max(MIN, e.w - dx);
+      return { ...e, x: Math.round((e.x + e.w - w) * 10) / 10, w: Math.round(w * 10) / 10 };
+    });
+    queueRender(d.el);
+    return renderSelection();
+  }
   if (d.kind === 'move') {
     const dx = pt[0] - d.origin[0], dy = pt[1] - d.origin[1];
     fn = (x, y) => [x + dx, y + dy];
@@ -839,7 +904,9 @@ export function renderSelection() {
   if (!els.length) { ed.sel = null; return; }
   const pageEl = elForPage(ed.sel.page);
   if (!pageEl) return;
-  const b = unionBox(els), ph = pageH(ed.sel.page), pad = 6;
+  // a single text box shows its frame (its wrap width) with width handles instead of the scale handle
+  const single = els.length === 1 && els[0].type === 'text' ? els[0] : null;
+  const b = single ? { x: single.x, y: single.y, w: single.w, h: bbox(single).h } : unionBox(els), ph = pageH(ed.sel.page), pad = 6;
   const btn = (label, ic, fn) => h('button', { title: label, onclick: fn }, icon(ic, 18), h('span', {}, label));
   pageEl.append(h('div', {
     class: 'selbox',
@@ -851,7 +918,9 @@ export function renderSelection() {
       btn('Kopieren', 'copy', copySelection),
       btn('Duplizieren', 'copy', duplicateSelection),
       btn('Löschen', 'trash', deleteSelection)),
-    h('div', { class: 'sel-handle', title: 'Größe ändern' })));
+    single
+      ? [h('div', { class: 'sel-wh l', 'data-side': 'l', title: 'Breite ändern (Text bricht neu um)' }), h('div', { class: 'sel-wh r', 'data-side': 'r', title: 'Breite ändern (Text bricht neu um)' })]
+      : h('div', { class: 'sel-handle', title: 'Größe ändern' })));
 }
 
 function recolorMenu(anchor) {
@@ -937,7 +1006,57 @@ function editText(pageEl, t, isNew) {
     setSize(s) { st.setStyle({ size: s }); },
   };
   ed.editing = st;
-  pageEl.append(box);
+  // frame around the open box: grip to move it, side handles to change the width (text rewraps, size stays)
+  const frame = h('div', { class: 'text-frame' },
+    h('div', { class: 'tf-grip', 'data-act': 'move', title: 'Textfeld verschieben', 'aria-label': 'Textfeld verschieben' }),
+    h('div', { class: 'tf-side l', 'data-act': 'l', title: 'Breite ändern', 'aria-label': 'Breite ändern' }),
+    h('div', { class: 'tf-side r', 'data-act': 'r', title: 'Breite ändern', 'aria-label': 'Breite ändern' }));
+  st.frame = frame;
+  const placeBox = st.place;
+  st.place = () => {
+    placeBox();
+    Object.assign(frame.style, { left: box.style.left, top: box.style.top, width: box.style.width, height: box.offsetHeight + 'px' });
+  };
+  const ro = new ResizeObserver(() => { if (ed.editing === st) frame.style.height = box.offsetHeight + 'px'; });
+  ro.observe(box);
+  st.unobserve = () => ro.disconnect();
+  // mousedown default would move the focus out of the box and end editing
+  frame.addEventListener('mousedown', e => e.preventDefault());
+  frame.addEventListener('click', e => e.stopPropagation());
+  frame.addEventListener('pointerdown', e => {
+    const handle = e.target, act = handle.dataset?.act;
+    if (!act) return;
+    e.preventDefault(); e.stopPropagation();
+    try { handle.setPointerCapture(e.pointerId); } catch {}
+    st.sync();
+    const caret = selectionOffsets(box) || st.sel;
+    const start = { cx: e.clientX, cy: e.clientY, x: st.el.x, y: st.el.y, w: st.el.w }, k = scale();
+    const r1 = v => Math.round(v * 10) / 10;
+    frame.classList.add('active');
+    const move = ev => {
+      ev.stopPropagation(); // the page's own pointer routing must not see this drag
+      const dx = (ev.clientX - start.cx) / k, dy = (ev.clientY - start.cy) / k;
+      if (act === 'move') {
+        st.el.x = r1(Math.min(PAGE_W - 20, Math.max(20 - start.w, start.x + dx)));
+        st.el.y = r1(Math.max(0, Math.min(pageH(page) - 20, start.y + dy)));
+      } else if (act === 'r') st.el.w = r1(Math.max(40, start.w + dx));
+      else { const w = Math.max(40, start.w - dx); st.el.x = r1(start.x + start.w - w); st.el.w = r1(w); }
+      st.place();
+    };
+    const up = ev => {
+      ev.stopPropagation();
+      frame.classList.remove('active');
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', up);
+      box.focus();
+      if (caret) setSelectionOffsets(box, caret[0], caret[1]); // the caret stays where it was
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
+  });
+  pageEl.append(box, frame);
   st.redraw();
   box.addEventListener('input', () => { if (!box.firstChild) box.append(h('br')); });
   box.addEventListener('blur', () => finishText());
@@ -974,7 +1093,7 @@ export async function finishText() {
   if (!st) return;
   st.sync();
   ed.editing = null;
-  st.box.remove();
+  st.box.remove(); st.frame?.remove(); st.unobserve?.();
   renderOptions();
   const page = st.page;
   // trailing whitespace is not kept

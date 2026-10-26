@@ -1,9 +1,9 @@
 // Offline cache for the app shell. Network first, so updates arrive as soon as you're online.
-const CACHE = 'folio-v37';
+const CACHE = 'folio-v42';
 const ASSETS = [
   './', 'index.html', 'style.css', 'manifest.json', 'folio-mark.svg', 'favicon.png', 'logo.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png',
   'js/main.js', 'js/util.js', 'js/icons.js', 'js/store.js', 'js/render.js', 'js/ink.js', 'js/ui.js',
-  'js/library.js', 'js/editor.js', 'js/tools.js', 'js/pdf.js', 'js/sync.js', 'js/suggest.js', 'js/goodnotes.js', 'js/goodnotes-export.js', 'js/textdoc.js', 'js/richtext.js', 'js/addpage.js', 'datenschutz.html',
+  'js/library.js', 'js/editor.js', 'js/tools.js', 'js/pdf.js', 'js/sync.js', 'js/suggest.js', 'js/goodnotes.js', 'js/goodnotes-export.js', 'js/textdoc.js', 'js/richtext.js', 'js/addpage.js', 'js/merge.js', 'js/ics.js', 'js/calendar.js', 'datenschutz.html',
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
@@ -20,9 +20,14 @@ self.addEventListener('activate', e => e.waitUntil(
   caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())
 ));
 
+// Only the app itself and its libraries are cached. Everything else — Google sign-in and APIs
+// (Drive, Calendar), calendar feeds (.ics) and any other address — always goes straight to the
+// network and is never stored here.
+const LIB_HOSTS = ['cdnjs.cloudflare.com', 'cdn.jsdelivr.net'];
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
-  if (e.request.method !== 'GET' || url.hostname.endsWith('google.com') || url.hostname.endsWith('googleapis.com')) return;
+  if (e.request.method !== 'GET') return;
+  if (url.origin !== self.location.origin && !LIB_HOSTS.includes(url.hostname)) return;
   e.respondWith(
     fetch(fresh(e.request))
       .then(r => { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return r; })

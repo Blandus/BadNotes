@@ -23,15 +23,24 @@ export function popover(anchor, content, { className = '' } = {}) {
   const place = () => {
     const a = anchor instanceof Element ? anchor.getBoundingClientRect()
       : { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y, width: 0 };
+    const viewport = window.visualViewport;
+    const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
+    const width = viewport?.width || innerWidth, height = viewport?.height || innerHeight;
+    pop.style.maxHeight = Math.max(0, height - 16) + 'px';
+    pop.style.maxWidth = Math.max(0, width - 16) + 'px';
     const pw = pop.offsetWidth, ph = pop.offsetHeight;
-    const x = clamp(a.left + a.width / 2 - pw / 2, 8, innerWidth - pw - 8);
+    const x = clamp(a.left + a.width / 2 - pw / 2, left + 8, Math.max(left + 8, left + width - pw - 8));
     let y = a.bottom + 8;
-    const above = y + ph > innerHeight - 8;
-    if (above) y = Math.max(8, a.top - ph - 8);
+    const above = y + ph > top + height - 8;
+    if (above) y = a.top - ph - 8;
+    y = clamp(y, top + 8, Math.max(top + 8, top + height - ph - 8));
     pop.style.left = x + 'px'; pop.style.top = y + 'px';
     pop.style.transformOrigin = `${a.left + a.width / 2 - x}px ${above ? ph : 0}px`;
   };
   place();
+  window.addEventListener('resize', place);
+  window.visualViewport?.addEventListener('resize', place);
+  window.visualViewport?.addEventListener('scroll', place);
   const onDown = e => {
     if (pop.contains(e.target)) return;
     if (anchor instanceof Element && anchor.contains(e.target)) return; // anchor click toggles
@@ -40,6 +49,9 @@ export function popover(anchor, content, { className = '' } = {}) {
   const onKey = e => { if (e.key === 'Escape') close(); };
   setTimeout(() => { document.addEventListener('pointerdown', onDown, true); document.addEventListener('keydown', onKey); });
   function close() {
+    window.removeEventListener('resize', place);
+    window.visualViewport?.removeEventListener('resize', place);
+    window.visualViewport?.removeEventListener('scroll', place);
     document.removeEventListener('pointerdown', onDown, true);
     document.removeEventListener('keydown', onKey);
     pop.remove();

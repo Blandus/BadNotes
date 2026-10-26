@@ -37,9 +37,9 @@
     <div class="tb-group right"><div id="undoPill" class="undo-group"></div><div class="tb-divider"></div><div class="tb-group-inner" id="tbRight"></div></div>
   </div>
   <!-- tool row: drawing · content · presentation tools, then the active tool's settings -->
+  <!-- main tool bar: only the tools, never changes size when switching tools -->
   <div class="toolrow">
     <div class="tb-tools" id="tbTools"></div>
-    <div id="optbar" class="opt-pill"></div>
   </div>
   <div class="ed-body">
     <aside id="thumbs" class="thumbs" hidden></aside>
@@ -47,6 +47,11 @@
       <div id="scroller"><div id="pages"></div></div>
       <canvas id="ink"></canvas>
       <canvas id="overlay"></canvas>
+      <!-- tool details (variants, colours, widths): own bar, docked top (horizontal) or left/right (vertical) -->
+      <div id="optdock" class="optdock">
+        <div class="optdock-grip" title="Leiste verschieben – an den Rand ziehen zum Andocken" aria-label="Leiste verschieben"></div>
+        <div id="optbar" class="opt-pill"></div>
+      </div>
       <div id="pageInd" class="float-pill page-pill"></div>
       <div id="zoomPill" class="float-pill zoom-pill"></div>
     </div>

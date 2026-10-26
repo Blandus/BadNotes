@@ -1,5 +1,6 @@
 import { uid } from './util.js';
 import { store, settings, saveSettings, bus, newNotebook, newFolder, newPage, COVERS } from './store.js';
+import { toast } from './ui.js';
 import { renderLibrary, applyTheme, importPdfFile, importFromClipboard } from './library.js';
 import { h } from './util.js';
 import { icon } from './icons.js';
@@ -72,6 +73,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 
 (async () => {
   applyTheme();
+  bus.addEventListener('dbblocked', () => toast('Folio ist noch in einem anderen Tab oder Fenster (ältere Version) geöffnet. Bitte dort schließen, dann startet Folio hier.', 8000));
   await store.open();
   initEditor();
   initTools();
@@ -88,3 +90,20 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 // If iPadOS still shifts the page (e.g. when the keyboard opens), put it back at once: a page
 // scrolled under the status bar gets blurred by the system.
 addEventListener('scroll', () => { if (scrollY || scrollX) scrollTo(0, 0); }, { passive: true });
+// The on-screen keyboard can shift the view without a scroll event; reset it when the keyboard
+// closes, the visible area changes, or the app comes back to the foreground.
+const unshift = () => { if (scrollY || scrollX || document.documentElement.scrollTop) scrollTo(0, 0); };
+addEventListener('focusout', () => setTimeout(unshift, 50));
+visualViewport?.addEventListener('resize', () => setTimeout(unshift, 50));
+visualViewport?.addEventListener('scroll', () => { if (!document.activeElement?.matches('input, textarea, [contenteditable="true"]')) unshift(); });
+addEventListener('orientationchange', () => setTimeout(unshift, 300));
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') unshift(); });
+// Dialogs only use the area above the on-screen keyboard (the page itself doesn't move, see
+// above), so a rename field is never hidden behind the keyboard: --kb = keyboard height.
+const keyboardInset = () => {
+  const vv = visualViewport;
+  const kb = vv ? Math.max(0, innerHeight - vv.height - vv.offsetTop) : 0;
+  document.documentElement.style.setProperty('--kb', kb + 'px');
+};
+visualViewport?.addEventListener('resize', keyboardInset);
+visualViewport?.addEventListener('scroll', keyboardInset);

@@ -29,7 +29,7 @@
   Kontakt: <a href="mailto:blandus.business@gmx.de">blandus.business@gmx.de</a></p>
 
   <h2>Daten auf deinem Gerät</h2>
-  <p>Notizbücher, Textdokumente, Ordner und Einstellungen liegen im Speicher deines Browsers (IndexedDB, localStorage).
+  <p>Notizbücher, Textdokumente, Ordner, Termine und Einstellungen liegen im Speicher deines Browsers (IndexedDB, localStorage).
   Sie verlassen dein Gerät nur, wenn du die Google-Drive-Synchronisation nutzt oder selbst etwas exportierst.</p>
 
   <h2>Anmeldung mit Google und Google Drive</h2>
@@ -43,6 +43,27 @@
   Die Verwendung von Daten aus Google-APIs entspricht der
   <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>
   einschließlich der Anforderungen zur eingeschränkten Nutzung (Limited Use).</p>
+
+  <h2>Kalender</h2>
+  <p><strong>Eigene Termine</strong> speichert Folio wie Notizen auf deinem Gerät und – bei Drive-Synchronisation – als
+  Dateien im Ordner „Folio“ in deinem Google Drive. <strong>Kalender-Abos</strong> (ICS-Adresse) ruft Folio nur auf
+  deinen Tipp direkt von deinem Gerät beim jeweiligen Kalender-Anbieter ab; dabei erhält dieser Anbieter technisch
+  bedingt deine IP-Adresse. Die Adresse des Abos und die abgerufenen bzw. importierten Termine werden wie deine
+  anderen Daten gespeichert (Gerät und, mit Sync, dein Drive). Behandle die Adresse eines privaten Kalenders wie ein
+  Passwort.</p>
+  <p><strong>Google Kalender</strong> ist optional und braucht eine eigene Zustimmung, unabhängig von Google Drive.
+  Folio erhält dann die Berechtigungen <code>calendar.calendarlist.readonly</code> (Liste deiner Kalender lesen) und
+  <code>calendar.events</code> (Termine anzeigen, anlegen, ändern und löschen). Folio liest nur die Termine der
+  gerade angezeigten Woche und ändert nur, was du in Folio selbst änderst. Der Zugangsschlüssel und die
+  Google-Termine bleiben nur im Arbeitsspeicher der geöffneten App; sie werden weder dauerhaft gespeichert noch
+  zwischengespeichert (auch nicht im Offline-Speicher der App) und nicht an den Betreiber übertragen. Gespeichert wird
+  auf deinem Gerät nur, welche Kalender du eingeblendet hast und welcher Kalender Ziel für neue Termine ist.
+  „Trennen“ in Folio oder <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">myaccount.google.com/permissions</a>
+  widerruft den Zugriff.</p>
+
+  <h2>Synchronisierung</h2>
+  <p>Für das Zusammenführen von Änderungen mehrerer Geräte merkt sich Folio auf jedem Gerät den zuletzt
+  synchronisierten Stand jedes Dokuments (nur lokal, wird nicht hochgeladen).</p>
 
   <h2>Externe Dienste beim Laden der App</h2>
   <p>Beim Öffnen lädt Folio Programmbibliotheken und die Schrift von Drittanbietern (cdnjs.cloudflare.com, cdn.jsdelivr.net,

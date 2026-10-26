@@ -1,6 +1,6 @@
 import { PAGE_W, PAPERS } from './store.js';
 import { r1 } from './util.js';
-import { widthAt } from './ink.js';
+import { fillStroke } from './ink.js';
 import { layout, drawRich, LINE_H } from './richtext.js';
 
 export const pageH = p => p.h || 1414;
@@ -83,21 +83,8 @@ export function drawStroke(ctx, s) {
     if (s.closed) ctx.closePath();
     ctx.stroke();
   } else {
-    if (p.length === 1) {
-      ctx.beginPath(); ctx.arc(p[0][0], p[0][1], widthAt(s, 0, 0, 0) / 2, 0, Math.PI * 2); ctx.fill();
-    } else {
-      // Quadratic curves through segment midpoints, each piece with its own width.
-      let prev = p[0];
-      for (let i = 1; i < p.length - 1; i++) {
-        const m = [(p[i][0] + p[i + 1][0]) / 2, (p[i][1] + p[i + 1][1]) / 2];
-        ctx.lineWidth = widthAt(s, i, m[0] - prev[0], m[1] - prev[1]);
-        ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.quadraticCurveTo(p[i][0], p[i][1], m[0], m[1]); ctx.stroke();
-        prev = m;
-      }
-      const last = p[p.length - 1];
-      ctx.lineWidth = widthAt(s, p.length - 1, last[0] - prev[0], last[1] - prev[1]);
-      ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.lineTo(last[0], last[1]); ctx.stroke();
-    }
+    // pen: one filled outline (see ink.js) — no seams or beads between pieces
+    fillStroke(ctx, s);
   }
   ctx.restore();
 }

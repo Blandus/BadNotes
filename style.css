@@ -237,13 +237,29 @@ svg { display: block; flex: none; }
 .fav-badge { position: absolute; top: 8px; left: 10px; color: var(--sage); }
 
 .folder-art { width: 104px; height: 82px; position: relative; }
-.folder-tab { position: absolute; left: 0; top: 0; width: 42px; height: 16px; border-radius: 6px 6px 0 0; background: var(--sage); opacity: .85; }
+.folder-tab { position: absolute; left: 0; top: 0; width: 42px; height: 16px; border-radius: 6px 6px 0 0; background: var(--fc, var(--sage)); opacity: .85; }
 .folder-body {
   position: absolute; inset: 8px 0 0 0; border-radius: 4px 10px 10px 10px;
-  background: var(--sage); box-shadow: 0 1px 2px rgba(15, 39, 71, .12);
+  background: var(--fc, var(--sage)); box-shadow: 0 1px 2px rgba(15, 39, 71, .12);
   display: flex; align-items: flex-end; justify-content: flex-end; padding: 8px 10px;
 }
-.folder-body span { color: rgba(255, 255, 255, .95); font-size: 12px; font-weight: 600; }
+.folder-body span { color: var(--fi, rgba(255, 255, 255, .95)); font-size: 12px; font-weight: 600; }
+.folder-icon { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -40%); color: var(--fi, #fff); display: flex; }
+.sb-ficon { display: flex; flex: none; margin: 0 1px; }
+.sb-item.sub .sb-ficon svg { color: inherit; }
+.pick-ficon { display: flex; }
+.pick-item .pick-ficon[style] svg { color: inherit; }
+/* folder look sheet */
+.flook-preview { display: flex; justify-content: center; padding: 6px 0 14px; }
+.flook-preview .folder-art { transform: scale(1.15); }
+.flook-label { font-size: 12px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .04em; margin: 12px 0 8px; }
+.flook-colors, .flook-icons { display: flex; flex-wrap: wrap; gap: 10px; }
+.flook-swatch { position: relative; width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(15, 39, 71, .15); display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--text-2); overflow: hidden; }
+.flook-swatch.custom { background: conic-gradient(#C9A35B, #6B8F7E, #3E6E9F, #7D6B91, #C9A35B); color: #fff; }
+.flook-swatch.active, .flook-icon.active { outline: 2.5px solid var(--accent); outline-offset: 2px; }
+.flook-custom-input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; border: 0; padding: 0; }
+.flook-icon { width: 42px; height: 42px; border-radius: 10px; background: var(--surface-2); display: flex; align-items: center; justify-content: center; color: var(--text); }
+.flook-icon.none { font-size: 11px; color: var(--text-2); }
 
 .lib-list { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--sep); border-radius: var(--radius); overflow: hidden; }
 .row { display: flex; align-items: center; border-bottom: 1px solid var(--sep); padding-right: 8px; }
@@ -290,14 +306,15 @@ svg { display: block; flex: none; }
 
 .backdrop {
   position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .4);
-  display: flex; align-items: center; justify-content: center; padding: 16px;
+  display: flex; align-items: center; justify-content: center; padding: 16px 16px calc(16px + var(--kb, 0px));
+  transition: padding-bottom .2s ease; /* stays above the on-screen keyboard (--kb, set in main.js) */
   animation: fade-in .2s ease;
 }
 .backdrop.closing { animation: fade-out .2s ease forwards; }
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes fade-out { to { opacity: 0; } }
 .sheet {
-  width: min(540px, 100%); max-height: calc(100dvh - 32px); display: flex; flex-direction: column;
+  width: min(540px, 100%); max-height: calc(100dvh - 32px - var(--kb, 0px)); display: flex; flex-direction: column;
   background: var(--surface); border-radius: 16px; overflow: hidden; box-shadow: var(--shadow-md);
   animation: sheet-in .26s var(--ease);
 }
@@ -693,6 +710,23 @@ svg { display: block; flex: none; }
   position: absolute; right: -9px; bottom: -9px; width: 18px; height: 18px; border-radius: 50%;
   background: #fff; border: 2px solid var(--accent); cursor: nwse-resize; box-shadow: var(--shadow-sm);
 }
+/* width handles (one text box selected / text box being edited): vertical bars at the side edges */
+.sel-wh, .tf-side {
+  position: absolute; top: 50%; width: 10px; height: 30px; margin-top: -15px; border-radius: 5px;
+  background: #fff; border: 2px solid var(--accent); cursor: ew-resize; box-shadow: var(--shadow-sm); touch-action: none;
+}
+.sel-wh.l { left: -6px; } .sel-wh.r { right: -6px; }
+.sel-wh::before, .tf-side::before, .tf-grip::before { content: ''; position: absolute; inset: -12px; }
+/* frame of the open text box: sits exactly over it, only the handles take input */
+.text-frame { position: absolute; pointer-events: none; z-index: 3; }
+.text-frame > * { pointer-events: auto; }
+.tf-side.l { left: -10px; } .tf-side.r { right: -10px; }
+.tf-grip {
+  position: absolute; left: 50%; top: -30px; width: 44px; height: 18px; margin-left: -22px; border-radius: 9px;
+  background: #fff; border: 2px solid var(--accent); cursor: move; box-shadow: var(--shadow-sm); touch-action: none;
+  background-image: radial-gradient(circle, var(--accent) 1.4px, transparent 1.6px); background-size: 7px 7px; background-position: center;
+}
+.text-frame.active .tf-grip, .text-frame.active .tf-side { background-color: #EAF2FB; }
 .sel-menu {
   position: absolute; left: 50%; bottom: calc(100% + 10px); transform: translateX(-50%);
   display: flex; background: #0F2747; color: #FAF9F5; border-radius: 12px; overflow: hidden;
@@ -722,15 +756,76 @@ svg { display: block; flex: none; }
   #pages { padding-top: 20px; }
 }
 @media (max-width: 700px) {
-  .sidebar { position: absolute; z-index: 20; height: 100%; box-shadow: var(--shadow-md); }
-  #library:not(.sidebar-hidden) .lib-main { pointer-events: none; opacity: .5; }
+  /* Mobile navigation is an explicit drawer, never a permanently open desktop sidebar. */
+  #library { position: relative; }
+  #library .sidebar, #library.sidebar-hidden .sidebar {
+    position: absolute; inset: 0 auto 0 0; z-index: 31;
+    width: min(320px, calc(100% - 48px)); height: 100%; margin-left: 0;
+    box-shadow: var(--shadow-md); transition: transform .2s var(--ease);
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+  #library:not(.sidebar-open) .sidebar { transform: translateX(-105%); visibility: hidden; pointer-events: none; }
+  #library.sidebar-open .sidebar { transform: translateX(0); visibility: visible; }
+  .sidebar-backdrop {
+    display: block; position: absolute; inset: 0; z-index: 30;
+    background: rgba(0, 0, 0, .4); touch-action: manipulation;
+  }
+  .sb-head { padding: 18px 8px; }
+  .sidebar-close { display: inline-flex; margin-left: auto; flex: none; }
+  .sb-item { min-height: 44px; }
+  .sb-item.sub { min-height: 44px; }
+  .sb-foot { flex: none; }
+  .sb-gear { width: 44px; height: 44px; }
+  .lib-head { flex: none; padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+  .lib-titlebar { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 10px; padding: 12px 0; }
+  .lib-titlebar > .iconbtn { width: 44px; height: 44px; margin: 0; }
+  .lib-titlebar > .lib-title { min-width: 0; }
+  .lib-titlebar > .searchfield { grid-column: 1 / -1; grid-row: 2; width: 100%; min-width: 0; height: 44px; font-size: 16px; }
+  .lib-titlebar > .fab { grid-column: 3; grid-row: 1; width: 44px; height: 44px; }
+  .lib-toolbar { display: flex; gap: 10px; padding-bottom: 12px; }
+  .lib-toolbar > .spacer { display: none; }
+  .filter-tabs { width: 100%; flex-wrap: nowrap; overflow-x: auto; padding: 2px 0 6px; scrollbar-width: none; }
+  .filter-tabs::-webkit-scrollbar { display: none; }
+  .filter-tab { flex: none; min-height: 40px; }
+  .lib-actions { width: 100%; min-width: 0; flex-wrap: wrap; gap: 6px; }
+  .lib-actions .iconbtn { width: 44px; height: 44px; }
+  .lib-actions .pill-btn { min-height: 40px; height: auto; }
+  .lib-actions .seg-icons button { width: 44px; height: 40px; }
+  .lib-content { padding: 4px max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+  .lib-grid { grid-template-columns: repeat(auto-fill, minmax(min(140px, 100%), 1fr)); gap: 12px; }
+  .thumb { height: 142px; padding: 12px 10px 0; }
+  .tile-meta { padding-left: 10px; }
+  .chev { width: 40px; height: 40px; }
+  .row-hit { gap: 10px; padding: 10px 8px; }
+  .row-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row-thumb { width: 32px; }
+  .toolbar { gap: 2px; padding-left: 4px; padding-right: 4px; overflow-x: auto; scrollbar-width: none; }
+  .toolbar::-webkit-scrollbar { display: none; }
+  .toolbar .tb-group { flex: none; }
+  .toolbar .tb-group, .toolbar .tb-group-inner, .toolbar .undo-group { gap: 0; }
+  .toolbar .tb-divider { display: none; }
+  .toolbar .barbtn, .toolbar .undo-group button { width: 38px; height: 44px; }
+  .toolbar #btnShare { display: flex; }
+  .backdrop { padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); }
+  .sheet { max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 16px); }
+  .sheet-body { padding: 14px; }
+  .menu-item { min-height: 44px; }
+  .nb-dialog { max-width: 100%; min-width: 0; }
+  .nb-filters { flex-wrap: wrap; }
+  .nb-foot { flex-wrap: wrap; }
+  .optdock.top .opt-pill { min-width: 0; flex: 1; }
+  .td-format { width: calc(100% - 16px); overflow-x: auto; }
+  .td-format .opt-inner { flex: none; }
+  .td-scroll { padding-left: 8px; padding-right: 8px; }
+  .textdoc-view .toolbar .tb-group:first-child { flex: 1; min-width: 0; }
+  .textdoc-view .doc-title { display: inline-flex; max-width: calc(100vw - 120px); }
   .doc-title { display: none; }
   .toolbtn { width: 36px; }
-  .thumbs { width: 150px; }
+  .thumbs { position: absolute; inset: 0 auto 0 0; z-index: 7; width: min(220px, 75vw); box-shadow: var(--shadow-md); }
   .thumb-frame { width: 96px; }
   .side-panel { position: absolute; right: 0; top: 0; bottom: 0; z-index: 5; width: 86vw; }
-  .lib-title h1 { font-size: 32px; }
-  .searchfield { width: 160px; }
+  .lib-title h1 { font-size: 24px; line-height: 30px; }
+  .searchfield { max-width: 100%; }
 }
 
 /* ---------- Text documents ---------- */
@@ -909,3 +1004,141 @@ button.sz-row:hover { background: var(--surface-3); }
 .acc-text { flex: 1; min-width: 0; }
 .acc-text .hint { overflow: hidden; text-overflow: ellipsis; }
 .about a { color: var(--accent); }
+/* Main tool row: one line, never wraps; on narrow screens it scrolls sideways instead */
+.toolrow { flex-wrap: nowrap !important; justify-content: flex-start !important; overflow-x: auto; scrollbar-width: none; }
+.toolrow::-webkit-scrollbar { display: none; }
+.toolrow > .tb-tools { margin: 0 auto; flex: none; }
+
+/* Tool details bar (#optdock): floats over the canvas, docked top / left / right */
+.optdock {
+  position: absolute; z-index: 5; display: flex; align-items: center; gap: 2px;
+  background: var(--opt-bg); border: 1px solid var(--sep); border-radius: 16px; box-shadow: var(--shadow-float);
+  padding: 3px; max-width: calc(100% - 24px); touch-action: none;
+}
+.optdock:has(.opt-pill:empty) { display: none; }
+.optdock.top { top: 10px; left: 50%; transform: translateX(-50%); }
+.optdock.left, .optdock.right { flex-direction: column; top: 50%; transform: translateY(-50%); max-height: calc(100% - 24px); }
+.optdock.left { left: calc(10px + env(safe-area-inset-left)); }
+.optdock.right { right: calc(10px + env(safe-area-inset-right)); }
+.optdock.dragging { transition: none; transform: none; opacity: .92; box-shadow: var(--shadow-md); }
+.optdock-grip {
+  flex: none; width: 14px; height: 34px; border-radius: 8px; cursor: grab; touch-action: none;
+  background: radial-gradient(circle, var(--text-3) 1.3px, transparent 1.6px) 0 0 / 7px 7px; background-position: 0 3px;
+}
+.optdock.left .optdock-grip, .optdock.right .optdock-grip { width: 34px; height: 14px; background-position: 3px 0; }
+.optdock .opt-pill { border: 0; background: none; height: auto; min-height: 40px; border-radius: 12px; }
+.optdock.left .opt-pill, .optdock.right .opt-pill { overflow-x: hidden; overflow-y: auto; min-height: 0; max-height: 100%; }
+.optdock.left .opt-inner, .optdock.right .opt-inner { flex-direction: column; padding: 4px 3px; }
+.optdock.left .opt-group, .optdock.right .opt-group, .optdock.left .stepper, .optdock.right .stepper { flex-direction: column; }
+.optdock.left .opt-sep, .optdock.right .opt-sep { width: 24px; height: 1px; margin: 2px 0; }
+.optdock.left .opt-hint, .optdock.right .opt-hint { display: none; }
+.optdock.left .opt-drop span, .optdock.right .opt-drop span { display: none; }
+.optdock.left .opt-drop, .optdock.right .opt-drop { padding: 4px 6px; }
+.optdock.left .chip, .optdock.right .chip { font-size: 11px; padding: 4px 8px; }
+#pages { transition: padding .2s var(--ease); }
+#editor.dock-top #pages { padding-top: 70px; }
+
+/* ---------- Sync conflict notes ---------- */
+.conflict-badge {
+  position: absolute; top: 8px; right: 10px; width: 20px; height: 20px; border-radius: 50%;
+  background: #C9A35B; color: #0F2747; font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+}
+.conflict-badge.inline { position: static; display: inline-flex; width: 16px; height: 16px; font-size: 11px; margin-left: 6px; vertical-align: middle; }
+.conflict-intro { margin: 0 0 12px; color: var(--text-2); font-size: 14px; line-height: 1.45; }
+.conflict-item { display: flex; flex-direction: column; gap: 2px; padding: 10px 0; border-top: 1px solid var(--sep); font-size: 14px; line-height: 1.4; }
+.conflict-time { font-size: 12px; color: var(--text-3); }
+#btnConflict { color: #C9A35B; }
+#btnConflict[hidden] { display: none; }
+
+/* ---------- Calendar (week view) ---------- */
+.lib-content:has(> .cal) { overflow: hidden; display: flex; flex-direction: column; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+.cal { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.cal-toolbar { gap: 8px; }
+.cal-nav { display: flex; align-items: center; gap: 4px; }
+.cal-range { font-size: 15px; font-weight: 600; margin-left: 8px; white-space: nowrap; }
+.cal-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; color: var(--text-2); }
+.cal-src { display: inline-flex; align-items: center; gap: 6px; }
+.cal-src i, .cal-detail-src i, .cal-feed > i { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.cal-src.err { color: var(--danger); }
+.cal-grid { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--sep); border-radius: var(--radius); overflow: hidden; }
+.cal-row, .cal-body { display: grid; grid-template-columns: 52px repeat(7, minmax(0, 1fr)); }
+.cal-heads { border-bottom: 1px solid var(--sep); }
+.cal-gutter { font-size: 11px; color: var(--text-3); padding: 6px 6px 0 0; text-align: right; }
+.cal-dayhead { display: flex; align-items: baseline; justify-content: center; gap: 6px; padding: 8px 0; font-size: 13px; color: var(--text-2); border-left: 1px solid var(--sep); }
+.cal-dnum { font-size: 17px; font-weight: 600; color: var(--text); }
+.cal-dayhead.today .cal-dnum { background: var(--accent); color: var(--surface); border-radius: 999px; min-width: 28px; padding: 1px 6px; text-align: center; }
+.cal-allday { border-bottom: 1px solid var(--sep); }
+.cal-adcell { border-left: 1px solid var(--sep); padding: 3px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cal-scroll { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+.cal-body { position: relative; }
+.cal-hours { position: relative; }
+.cal-hour { position: absolute; right: 6px; transform: translateY(-50%); font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.cal-col {
+  position: relative; border-left: 1px solid var(--sep); cursor: copy;
+  background-image: linear-gradient(var(--sep) 1px, transparent 1px); background-size: 100% 44px;
+}
+.cal-col.today { background-color: var(--accent-soft); }
+.cal-now { position: absolute; left: 0; right: 0; height: 2px; background: #C0504D; pointer-events: none; z-index: 2; }
+.cal-now::before { content: ''; position: absolute; left: -4px; top: -3px; width: 8px; height: 8px; border-radius: 50%; background: #C0504D; }
+.cal-ev {
+  position: absolute; z-index: 1; display: flex; flex-direction: column; align-items: flex-start; overflow: hidden; text-align: left;
+  padding: 3px 6px; border-radius: 6px; font-size: 12px; line-height: 1.25; cursor: pointer;
+  background: color-mix(in srgb, var(--ec) 22%, var(--surface)); border-left: 3px solid var(--ec); color: var(--text);
+}
+.cal-ev:hover { background: color-mix(in srgb, var(--ec) 34%, var(--surface)); }
+.cal-ev-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.cal-ev-time { color: var(--text-2); font-size: 11px; font-variant-numeric: tabular-nums; }
+.cal-ev.stacked { box-shadow: 0 0 0 1.5px var(--surface); }
+.cal-ev.short { flex-direction: row; gap: 6px; align-items: center; white-space: nowrap; }
+.cal-ev.chip { position: static; width: 100%; padding: 2px 6px; white-space: nowrap; }
+.cal-form .cal-when { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px; }
+.cal-until { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.cal-until[hidden], .cal-form [hidden], .cal-note[hidden] { display: none; }
+.cal-detail { display: flex; flex-direction: column; gap: 8px; font-size: 15px; line-height: 1.4; }
+.cal-detail-title { font-size: 20px; font-weight: 600; }
+.cal-desc { white-space: pre-wrap; color: var(--text-2); font-size: 14px; max-height: 40vh; overflow: auto; }
+.cal-detail-src { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); margin-top: 6px; }
+.cal-note { font-size: 13px; color: var(--text-2); background: var(--surface-2); border-radius: 8px; padding: 8px 10px; }
+.cal-del { align-self: flex-start; margin-top: 10px; }
+.cal-hint { font-size: 13px; color: var(--text-2); line-height: 1.45; margin: 4px 0 8px; }
+.cal-help p { margin: 0 0 10px; line-height: 1.45; }
+.cal-help a { color: var(--accent); }
+.cal-feed { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--sep); }
+.cal-feed-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--text-2); }
+.cal-feed-main b { color: var(--text); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal-err { color: var(--danger); }
+.cal-sub { display: flex; gap: 8px; margin-top: 8px; }
+.cal-sub .field { flex: 1; min-width: 0; }
+.cal-row-btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.cal-gcals { display: flex; flex-direction: column; gap: 4px; }
+@media (max-width: 700px) {
+  .cal-grid { overflow-x: auto; }
+  .cal-row, .cal-body { grid-template-columns: 40px repeat(7, minmax(64px, 1fr)); min-width: 500px; }
+  .cal-nav { flex-wrap: wrap; }
+  .cal-toolbar .lib-actions { flex-wrap: wrap; }
+  .cal-range { width: 100%; margin: 4px 0 0; }
+  .cal-form .cal-when { grid-template-columns: 1fr 1fr; }
+  .cal-form .cal-when > :first-child { grid-column: 1 / -1; }
+}
+
+.import-report { margin: 0; padding-left: 18px; font-size: 13px; color: var(--text-2); line-height: 1.5; max-height: 30vh; overflow: auto; overflow-wrap: anywhere; }
+
+/* Inner panes own scrolling; keep the document fixed for the iPad status bar. */
+.lib-main, .lib-content, .sb-nav { min-height: 0; }
+.sidebar-close, .sidebar-backdrop, .sidebar-backdrop[hidden] { display: none; }
+@media (max-width: 700px) {
+  .sidebar-close { display: inline-flex; }
+  .sidebar-backdrop:not([hidden]) { display: block; }
+}
+.popover { max-height: calc(100dvh - 16px); overflow-y: auto; overscroll-behavior: contain; }
+
+@media (max-width: 700px) {
+  .optdock.top, .optdock.top .opt-pill { touch-action: pan-x; }
+  .optdock.left, .optdock.right, .optdock.left .opt-pill, .optdock.right .opt-pill { touch-action: pan-y; }
+  .nb-left { max-height: 44dvh; overflow-y: auto; }
+}
+
+@media (max-width: 700px) {
+  /* One shared horizontal scroll position keeps weekday headings and time columns aligned. */
+  .cal-grid > .cal-scroll { min-width: 500px; overflow-x: hidden; }
+}

@@ -8,12 +8,14 @@ import { openDoc } from './editor.js';
 import { suggestNames } from './suggest.js';
 import { sync, signIn, signOut, signedIn } from './sync.js';
 import { newTextDoc, openTextDoc, renderTextThumb, plainText, printDoc } from './textdoc.js';
+import { renderCalendar, CAL_KINDS } from './calendar.js';
 
 const SECTIONS = {
   docs: { label: 'Alle Notizen', icon: 'notes' },
   favorites: { label: 'Favoriten', icon: 'favorites' },
   recent: { label: 'Zuletzt geöffnet', icon: 'clock' },
   trash: { label: 'Papierkorb', icon: 'trash' },
+  calendar: { label: 'Kalender', icon: 'calendar' },
 };
 const SORTS = [['date', 'Datum', 'Änderungsdatum'], ['created', 'Erstellt', 'Erstellungsdatum'], ['name', 'Name', 'Name']];
 
@@ -24,6 +26,57 @@ const lib = {
 };
 let records = [];
 const root = $('#library');
+const compactLibrary = matchMedia('(max-width: 700px)');
+let mobileSidebarOpen = false;
+const sidebarBackdrop = h('button', {
+  class: 'sidebar-backdrop', type: 'button', hidden: true, tabindex: '-1',
+  'aria-label': 'Navigation schließen', onclick: () => setMobileSidebar(false),
+});
+root.append(sidebarBackdrop);
+
+function updateSidebar() {
+  const modal = compactLibrary.matches && mobileSidebarOpen;
+  const hidden = compactLibrary.matches ? !modal : settings.sidebarHidden === true;
+  root.classList.toggle('sidebar-hidden', hidden);
+  root.classList.toggle('sidebar-open', modal);
+  sidebarBackdrop.hidden = !modal;
+  const sidebar = $('#sidebar');
+  sidebar.inert = hidden;
+  sidebar.setAttribute('aria-hidden', String(hidden));
+  sidebar.setAttribute('aria-label', 'Bibliotheksnavigation');
+  if (modal) {
+    sidebar.setAttribute('role', 'dialog');
+    sidebar.setAttribute('aria-modal', 'true');
+  } else {
+    sidebar.removeAttribute('role');
+    sidebar.removeAttribute('aria-modal');
+  }
+  $('.lib-main', root).inert = modal;
+  $('#sidebarToggle')?.setAttribute('aria-expanded', String(!hidden));
+}
+function setMobileSidebar(open) {
+  mobileSidebarOpen = open;
+  updateSidebar();
+  $(open ? '#sidebarClose' : '#sidebarToggle')?.focus();
+}
+function toggleSidebar() {
+  if (compactLibrary.matches) return setMobileSidebar(!mobileSidebarOpen);
+  settings.sidebarHidden = !settings.sidebarHidden;
+  saveSettings(); updateSidebar();
+}
+compactLibrary.addEventListener('change', () => {
+  mobileSidebarOpen = false;
+  updateSidebar();
+});
+document.addEventListener('keydown', e => {
+  if (root.hidden || !compactLibrary.matches || !mobileSidebarOpen || document.querySelector('.backdrop, .popover')) return;
+  if (e.key === 'Escape') { e.preventDefault(); setMobileSidebar(false); }
+  if (e.key !== 'Tab') return;
+  const buttons = [...$('#sidebar').querySelectorAll('button:not(:disabled), a[href], input, [tabindex="0"]')];
+  const first = buttons[0], last = buttons[buttons.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+});
 const byId = id => records.find(r => r.id === id);
 const live = () => records.filter(r => !r.deleted);
 
@@ -57,18 +110,29 @@ function items() {
 }
 
 export async function renderLibrary() {
-  records = await store.all();
+  records = (await store.all()).filter(r => !CAL_KINDS.has(r.kind)); // calendar records live in the calendar view
   if (lib.folder && (!byId(lib.folder) || byId(lib.folder).trashed)) lib.folder = null;
-  root.classList.toggle('sidebar-hidden', settings.sidebarHidden === true);
   renderSidebar();
+  if (lib.section === 'calendar') {
+    $('#libHead').replaceChildren(h('div', { class: 'lib-titlebar' }, sidebarBtn(), h('div', { class: 'lib-title' }, h('h1', { id: 'libTitle' }, 'Kalender'))));
+    updateSidebar();
+    return renderCalendar($('#libHead'), $('#libContent'));
+  }
   renderHeader();
   renderContent();
+  updateSidebar();
 }
+const sidebarBtn = () => h('button', {
+  class: 'iconbtn plain', title: 'Seitenleiste', 'aria-label': 'Seitenleiste',
+  id: 'sidebarToggle', 'aria-controls': 'sidebar',
+  'aria-expanded': String(compactLibrary.matches ? mobileSidebarOpen : !settings.sidebarHidden), onclick: toggleSidebar,
+}, icon('sidebar', 20));
 bus.addEventListener('change', () => { if (!root.hidden) renderLibrary(); });
 bus.addEventListener('sync', () => { const s = $('#sbStatus'); if (s) s.textContent = settings.syncStatus || 'Synchronisieren'; });
 bus.addEventListener('account', () => renderSidebar());
 
 function go(section, folder = null) {
+  mobileSidebarOpen = false;
   lib.section = section; lib.folder = folder; lib.query = '';
   lib.selecting = false; lib.selected.clear();
   settings.section = section; saveSettings();
@@ -77,7 +141,22 @@ function go(section, folder = null) {
 
 // ---------- Sidebar ----------
 // Folder dots cycle through the brand's quiet colours
-const FOLDER_DOTS = ['#6B8F7E', '#D9D2C6', '#8EB8E6', '#A7B4C6', '#B9C9A8'];
+// Folder look: colour from the Folio palette (or any custom colour) and an optional symbol.
+// Folders without a colour keep the default sage (theme variable, so dark mode still fits).
+const FOLDER_ICONS = ['book', 'school', 'work', 'idea', 'flask', 'music', 'heart', 'code', 'calendar', 'home', 'star', 'camera', 'palette', 'doc'];
+const folderColor = f => (/^#[0-9a-f]{6}$/i.test(f?.color || '') ? f.color : 'var(--sage)');
+const folderIcon = f => (FOLDER_ICONS.includes(f?.icon) ? f.icon : null);
+// dark ink on light folder colours, white on dark ones
+function folderInk(c) {
+  if (!c.startsWith('#')) return 'rgba(255, 255, 255, .95)';
+  const [r, g, b] = [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16) / 255).map(v => (v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4));
+  return .2126 * r + .7152 * g + .0722 * b > .45 ? 'rgba(15, 39, 71, .85)' : 'rgba(255, 255, 255, .95)';
+}
+function folderArt(f, count) {
+  const c = folderColor(f);
+  return h('div', { class: 'folder-art', style: { '--fc': c, '--fi': folderInk(c) } }, h('div', { class: 'folder-tab' }),
+    h('div', { class: 'folder-body' }, folderIcon(f) ? h('i', { class: 'folder-icon' }, icon(folderIcon(f), 26)) : null, h('span', {}, count || '')));
+}
 function renderSidebar() {
   const sb = $('#sidebar');
   const folders = live().filter(r => r.kind === 'folder' && !r.trashed && !r.parent).sort((a, b) => a.name.localeCompare(b.name, 'de'));
@@ -87,18 +166,23 @@ function renderSidebar() {
     onclick: () => go(key),
   }, icon(s.icon, 20), h('span', {}, s.label));
   sb.replaceChildren(
-    h('div', { class: 'sb-head' }, folioMark(30), h('span', {}, 'Folio')),
+    h('div', { class: 'sb-head' }, folioMark(30), h('span', {}, 'Folio'),
+      h('button', { id: 'sidebarClose', class: 'iconbtn plain sidebar-close', type: 'button',
+        title: 'Navigation schließen', 'aria-label': 'Navigation schließen', onclick: () => setMobileSidebar(false) }, icon('close', 20))),
     h('nav', { class: 'sb-nav' },
       item('docs', SECTIONS.docs),
       item('recent', SECTIONS.recent),
       item('favorites', SECTIONS.favorites),
       item('trash', SECTIONS.trash),
+      item('calendar', SECTIONS.calendar),
       folders.length ? h('div', { class: 'sb-label' }, 'Ordner') : null,
-      ...folders.map((f, i) => h('button', {
+      ...folders.map(f => h('button', {
         class: 'sb-item sub' + (lib.folder && folderPath(lib.folder)[0]?.id === f.id ? ' active' : ''),
         'data-drop': f.id,
         onclick: () => go('docs', f.id),
-      }, h('i', { class: 'sb-dot', style: { background: FOLDER_DOTS[i % FOLDER_DOTS.length] } }), h('span', {}, f.name)))),
+      }, folderIcon(f)
+        ? h('i', { class: 'sb-ficon', style: { color: folderColor(f) } }, icon(folderIcon(f), 18))
+        : h('i', { class: 'sb-dot', style: { background: folderColor(f) } }), h('span', {}, f.name)))),
     h('div', { class: 'sb-foot' },
       signedIn()
         ? h('button', { id: 'sbSync', class: 'sb-sync', title: 'Jetzt synchronisieren', onclick: () => sync(true) },
@@ -107,7 +191,7 @@ function renderSidebar() {
             h('b', {}, settings.account?.name || settings.account?.email || 'Google Drive'),
             h('span', { id: 'sbStatus' }, settings.syncStatus || 'Synchronisieren')))
         : h('button', { class: 'sb-signin', onclick: signIn }, googleG(), h('span', {}, 'Mit Google anmelden')),
-      h('button', { class: 'sb-gear', title: 'Einstellungen', 'aria-label': 'Einstellungen', onclick: openSettings }, icon('gear', 18))));
+      h('button', { class: 'sb-gear', title: 'Einstellungen', 'aria-label': 'Einstellungen', onclick: () => { if (compactLibrary.matches) setMobileSidebar(false); openSettings(); } }, icon('gear', 18))));
 }
 // Google's "G" (official brand colours, as Google's sign-in guidelines ask for on sign-in buttons)
 function googleG() {
@@ -130,10 +214,7 @@ function renderHeader() {
     onkeydown: e => { if (e.key === 'Escape') { lib.query = ''; e.target.value = ''; e.target.blur(); renderContent(); renderHeaderTitle(); } },
   });
   const titlebar = h('div', { class: 'lib-titlebar' },
-    h('button', {
-      class: 'iconbtn plain', title: 'Seitenleiste', 'aria-label': 'Seitenleiste',
-      onclick: () => { settings.sidebarHidden = !settings.sidebarHidden; saveSettings(); root.classList.toggle('sidebar-hidden', settings.sidebarHidden); },
-    }, icon('sidebar', 20)),
+    sidebarBtn(),
     h('div', { class: 'lib-title' },
       path.length && !lib.query ? h('button', { class: 'backbtn', title: 'Zurück', 'data-drop': path[path.length - 2]?.id || '', onclick: () => go('docs', path[path.length - 2]?.id || null) }, icon('chevronLeft', 24)) : null,
       h('h1', { id: 'libTitle' }, title)),
@@ -184,7 +265,7 @@ function renderHeaderTitle() { $('#libTitle').textContent = lib.query ? 'Suche' 
 function thumbFor(r, width) {
   if (r.kind === 'folder') {
     const count = live().filter(x => x.parent === r.id && !x.trashed).length;
-    return h('div', { class: 'folder-art' }, h('div', { class: 'folder-tab' }), h('div', { class: 'folder-body' }, h('span', {}, count || '')));
+    return folderArt(r, count);
   }
   const c = h('canvas', { class: r.cover ? 'cover' : 'paper' });
   if (r.kind === 'textdoc') { renderTextThumb(c, r, width * 2); return c; }
@@ -227,7 +308,8 @@ function tile(r) {
   const t = h('div', { class: 'tile' + (lib.selected.has(r.id) ? ' selected' : '') + (r.kind === 'folder' ? ' is-folder' : '') },
     h('button', { class: 'thumb', onclick: () => activate(r), 'aria-label': r.name }, thumbFor(r, 125),
       lib.selecting ? h('span', { class: 'checkmark' }, lib.selected.has(r.id) ? icon('check', 16) : '') : null,
-      r.favorite ? h('span', { class: 'fav-badge' }, icon('starFill', 14)) : null),
+      r.favorite ? h('span', { class: 'fav-badge' }, icon('starFill', 14)) : null,
+      r.conflicts?.length ? h('span', { class: 'conflict-badge', title: 'Sync-Hinweis: auf mehreren Geräten geändert' }, '!') : null),
     h('div', { class: 'tile-meta' },
       h('div', { class: 'tile-text' },
         h('div', { class: 'tile-title' }, h('span', { title: r.name }, r.name)),
@@ -243,7 +325,7 @@ function row(r) {
     h('button', { class: 'row-hit', onclick: () => activate(r) },
       h('div', { class: 'row-thumb' }, thumbFor(r, 40)),
       h('div', { class: 'row-main' },
-        h('div', { class: 'row-title' }, r.name, r.favorite ? icon('starFill', 12) : ''),
+        h('div', { class: 'row-title' }, r.name, r.favorite ? icon('starFill', 12) : '', r.conflicts?.length ? h('span', { class: 'conflict-badge inline', title: 'Sync-Hinweis: auf mehreren Geräten geändert' }, '!') : ''),
         h('div', { class: 'row-sub' }, sub(r) + (r.kind === 'notebook' ? ` · ${r.pages.length} ${r.pages.length === 1 ? 'Seite' : 'Seiten'}` : r.kind === 'textdoc' ? ' · Textdokument' : ''))),
       lib.selecting ? h('span', { class: 'checkmark' }, lib.selected.has(r.id) ? icon('check', 16) : '') : null),
     lib.selecting ? null : h('button', { class: 'chev', title: 'Optionen', 'aria-label': 'Optionen', onclick: e => itemMenu(r, e.currentTarget) }, icon('dots', 18)));
@@ -375,6 +457,8 @@ function itemMenu(r, anchor) {
     { label: 'Verschieben', icon: 'move', action: () => moveItems([r.id]) },
     { label: r.favorite ? 'Aus Favoriten entfernen' : 'Zu Favoriten', icon: r.favorite ? 'starFill' : 'star', action: () => update(r, { favorite: !r.favorite }) },
     nb && { label: 'Cover ändern', icon: 'palette', action: () => changeCover(r) },
+    r.kind === 'folder' && { label: 'Farbe & Symbol', icon: 'palette', action: () => changeFolderLook(r) },
+    r.conflicts?.length && { label: `Sync-Hinweise (${r.conflicts.length})`, icon: 'sync', action: () => clearConflicts(r) },
     nb && { label: 'Als PDF exportieren', icon: 'share', action: () => exportPdf(r) },
     text && { label: 'Als PDF (Drucken)', icon: 'share', action: () => printDoc(r) },
     doc && { label: 'Als Goodnotes-Datei (Beta)', icon: 'doc', action: async () => (await import('./goodnotes-export.js')).exportGoodnotes(r) },
@@ -407,7 +491,7 @@ async function duplicate(ids) {
 
 // Folder picker sheet. Resolves to a folder id, null for the top level, or undefined when cancelled.
 async function pickFolder(title, doneLabel, { exclude = new Set(), preselect } = {}) {
-  records = await store.all();
+  records = (await store.all()).filter(r => !CAL_KINDS.has(r.kind)); // calendar records live in the calendar view
   const folders = live().filter(r => r.kind === 'folder' && !r.trashed && !exclude.has(r.id));
   let target = preselect;
   const tree = (parent, depth) => folders.filter(f => (f.parent || null) === parent).sort((a, b) => a.name.localeCompare(b.name, 'de'))
@@ -417,7 +501,7 @@ async function pickFolder(title, doneLabel, { exclude = new Set(), preselect } =
     return h('button', {
       class: 'pick-item' + (id === preselect ? ' active' : ''), style: { paddingLeft: 14 + depth * 22 + 'px' },
       onclick: e => { target = id; list.querySelectorAll('.pick-item').forEach(b => b.classList.toggle('active', b === e.currentTarget)); },
-    }, icon('folder', 18), h('span', {}, name));
+    }, h('i', { class: 'pick-ficon', style: id ? { color: folderColor(byId(id)) } : {} }, icon(id && folderIcon(byId(id)) || 'folder', 18)), h('span', {}, name));
   }
   list.append(opt(null, 'Dokumente', 0), ...tree(null, 1));
   const ok = await sheet({ title, body: list, done: doneLabel, onDone: () => target !== undefined || (toast('Bitte einen Ordner wählen'), false) });
@@ -473,6 +557,42 @@ async function changeCover(r) {
   let cover = r.cover;
   const body = coverPicker(r.cover, v => { cover = v; });
   if (await sheet({ title: 'Cover ändern', body })) update(r, { cover });
+}
+
+// Notes left by the sync merge (merge.js). Resolves true when the user marks them as read.
+export async function showConflicts(r) {
+  const fmt = t => new Date(t).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
+  const body = h('div', { class: 'conflict-list' },
+    h('p', { class: 'conflict-intro' }, 'Dieses Dokument wurde auf mehreren Geräten gleichzeitig geändert. Folio hat die Änderungen zusammengeführt; nichts wurde verworfen. Bitte prüfe die genannten Stellen.'),
+    ...(r.conflicts || []).map(c => h('div', { class: 'conflict-item' }, h('span', { class: 'conflict-time' }, fmt(c.at)), h('span', {}, c.text))));
+  return !!(await sheet({ title: 'Sync-Hinweise', body, done: 'Gelesen' }));
+}
+async function clearConflicts(r) {
+  if (!(await showConflicts(r))) return;
+  delete r.conflicts;
+  await update(r, {});
+}
+
+// Colour (Folio palette + custom) and symbol for a folder, with a live preview.
+async function changeFolderLook(f) {
+  let color = folderColor(f).startsWith('#') ? f.color : null, ic = folderIcon(f);
+  const isPalette = c => COVERS.some(x => x.toLowerCase() === c?.toLowerCase());
+  const preview = h('div', { class: 'flook-preview' });
+  const colors = h('div', { class: 'flook-colors' }), icons = h('div', { class: 'flook-icons' });
+  const custom = h('input', { type: 'color', class: 'flook-custom-input', 'aria-label': 'Eigene Farbe', value: color || '#6B8F7E', oninput: e => { color = e.target.value; render(); } });
+  const render = () => {
+    preview.replaceChildren(folderArt({ color, icon: ic }, ''));
+    colors.replaceChildren(
+      h('button', { class: 'flook-swatch' + (!color ? ' active' : ''), title: 'Standard', 'aria-label': 'Standardfarbe', style: { background: 'var(--sage)' }, onclick: () => { color = null; render(); } }),
+      ...COVERS.map(c => h('button', { class: 'flook-swatch' + (color?.toLowerCase() === c.toLowerCase() ? ' active' : ''), 'aria-label': 'Farbe ' + c, style: { background: c }, onclick: () => { color = c; render(); } })),
+      h('label', { class: 'flook-swatch custom' + (color && !isPalette(color) ? ' active' : ''), title: 'Eigene Farbe', style: color && !isPalette(color) ? { background: color } : {} }, icon('plus', 16), custom));
+    icons.replaceChildren(
+      h('button', { class: 'flook-icon none' + (!ic ? ' active' : ''), title: 'Kein Symbol', onclick: () => { ic = null; render(); } }, h('span', {}, 'Kein')),
+      ...FOLDER_ICONS.map(k => h('button', { class: 'flook-icon' + (ic === k ? ' active' : ''), 'aria-label': 'Symbol ' + k, onclick: () => { ic = k; render(); } }, icon(k, 22))));
+  };
+  render();
+  const body = h('div', { class: 'flook' }, preview, h('div', { class: 'flook-label' }, 'Farbe'), colors, h('div', { class: 'flook-label' }, 'Symbol'), icons);
+  if (await sheet({ title: 'Farbe & Symbol', body }) && (color !== (f.color || null) || ic !== (f.icon || null))) update(f, { color, icon: ic });
 }
 
 function coverPicker(value, onChange) {
@@ -655,6 +775,13 @@ export async function isGoodnotes(file) {
 // ask where to save, then convert and open.
 export async function importPdfFile(file, name = file.name) {
   const gn = await isGoodnotes(file);
+  if (gn) { // a ZIP of a whole Goodnotes folder ("Exportieren" on a folder) instead of one document?
+    try {
+      const { unzip } = await import('./goodnotes.js');
+      const zip = await unzip(await file.arrayBuffer());
+      if (!zip.has('index.events.pb') && [...zip.keys()].some(k => /\.goodnotes$/i.test(k))) return importGoodnotesFolder(file, zip);
+    } catch { /* not readable as ZIP: the document import below reports it */ }
+  }
   let title = (name || (gn ? 'Goodnotes-Import' : 'Importiertes PDF')).replace(/\.(pdf|goodnotes)$/i, '');
   const parent = await pickFolder(`„${title}“ speichern in`, 'Speichern', { preselect: lib.section === 'docs' ? lib.folder : null });
   if (parent === undefined) return;
@@ -675,6 +802,92 @@ export async function importPdfFile(file, name = file.name) {
     await store.put(nb);
     openDoc(nb.id);
   } catch (err) { toast('Import fehlgeschlagen: ' + err.message, 6000); }
+}
+
+// ---------- Goodnotes folder export (ZIP) ----------
+// Goodnotes exports a folder as a ZIP: "<Folder>/<Sub>/<Doc>.goodnotes" entries plus
+// ".goodnotesmeta" (JSON: items [{ path, color, symbol }] for the folders). The folder tree is
+// rebuilt as real Folio folders; each document goes through the normal .goodnotes import.
+// Nothing is overwritten: folders that already exist can be merged into, documents with a name
+// that already exists there get a number; everything not imported is listed at the end.
+const GN_COLORS = { blue: '#3E6E9F', lightBlue: '#8EB8E6', teal: '#8EB8E6', green: '#4F7A66', mint: '#6B8F7E', yellow: '#C9A35B', orange: '#B8A68A', brown: '#B8A68A', purple: '#7D6B91', pink: '#7D6B91', red: '#7D6B91', gray: '#A7B4C6', grey: '#A7B4C6', black: '#3A3F4A' };
+async function importGoodnotesFolder(file, zip) {
+  const entries = [...zip.keys()];
+  const docs = entries.filter(k => /\.goodnotes$/i.test(k) && !k.startsWith('__MACOSX/'));
+  const skipped = entries.filter(k => !docs.includes(k) && !k.endsWith('/') && k !== '.goodnotesmeta' && !/(^|\/)(\.DS_Store|__MACOSX\/.*)$/.test(k))
+    .map(k => [k, 'kein Goodnotes-Dokument']);
+  let meta = {};
+  try { if (zip.has('.goodnotesmeta')) for (const it of JSON.parse(new TextDecoder().decode(await zip.get('.goodnotesmeta')())).items || []) meta[it.path] = it; } catch {}
+  const dirOf = k => k.split('/').slice(0, -1).join('/');
+  const paths = [...new Set([...Object.keys(meta), ...docs.map(dirOf).filter(Boolean)].flatMap(p => p.split('/').map((_, i, a) => a.slice(0, i + 1).join('/'))))].sort();
+  const roots = [...new Set(paths.map(p => p.split('/')[0]))];
+  const label = roots.length === 1 ? `„${roots[0]}“` : `${roots.length} Ordner`;
+
+  const parent = await pickFolder(`${label} importieren nach`, 'Weiter', { preselect: lib.section === 'docs' ? lib.folder : null });
+  if (parent === undefined) return;
+  records = (await store.all()).filter(r => !CAL_KINDS.has(r.kind));
+  const sameName = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
+  const existingFolder = (name, par) => live().find(r => r.kind === 'folder' && !r.trashed && (r.parent || null) === par && sameName(r.name, name));
+  const clashes = roots.filter(n => existingFolder(n, parent));
+  let mode = 'merge';
+  const summary = h('div', { class: 'form' },
+    h('p', { class: 'cal-hint' }, `${docs.length} Dokument${docs.length === 1 ? '' : 'e'} in ${paths.length} Ordner${paths.length === 1 ? '' : 'n'}${skipped.length ? `, ${skipped.length} andere Datei(en) werden übersprungen` : ''}.`),
+    clashes.length ? h('div', {},
+      h('p', { class: 'cal-hint' }, `Am Ziel gibt es schon: ${clashes.map(n => `„${n}“`).join(', ')}.`),
+      segmented([['merge', 'Zusammenlegen'], ['new', 'Neuer Ordner']], mode, v => { mode = v; }),
+      h('p', { class: 'cal-hint' }, 'Zusammenlegen: Dokumente kommen in den vorhandenen Ordner; gleichnamige werden nummeriert, nichts wird überschrieben.')) : null);
+  if (!(await sheet({ title: 'Goodnotes-Ordner importieren', body: summary, done: 'Importieren' }))) return;
+
+  const { goodnotesToNotebook } = await import('./goodnotes.js');
+  const folderIds = new Map(); // zip path → Folio folder id
+  const made = [], renamed = [], failed = [];
+  const uniqueName = (name, par, kind) => {
+    const taken = n => live().some(r => !r.trashed && r.kind === kind && (r.parent || null) === par && sameName(r.name, n));
+    if (!taken(name)) return name;
+    let i = 2; while (taken(`${name} (${i})`)) i++;
+    return `${name} (${i})`;
+  };
+  try {
+    for (const p of paths) {
+      const parts = p.split('/'), name = parts[parts.length - 1], par = parts.length > 1 ? folderIds.get(parts.slice(0, -1).join('/')) : parent;
+      const reuse = mode === 'merge' ? existingFolder(name, par) : null;
+      if (reuse) { folderIds.set(p, reuse.id); continue; }
+      const f = newFolder(uniqueName(name, par, 'folder'), par);
+      const c = GN_COLORS[meta[p]?.color];
+      if (c) f.color = c;
+      await store.put(f); records.push(f); folderIds.set(p, f.id); made.push(f.name);
+    }
+    let i = 0;
+    for (const k of docs) {
+      i++;
+      const base = k.split('/').pop().replace(/\.goodnotes$/i, '');
+      toast(`Importiere ${i}/${docs.length}: ${base}…`, 0);
+      const par = folderIds.get(dirOf(k)) ?? parent;
+      try {
+        const bytes = await zip.get(k)();
+        const doc = await goodnotesToNotebook(new File([bytes], base + '.goodnotes'));
+        const want = doc.name || base;
+        const kind = doc.blocks ? 'textdoc' : 'notebook';
+        const name = uniqueName(want, par, kind);
+        if (name !== want) renamed.push(`${want} → ${name}`);
+        const rec = doc.blocks ? { ...newTextDoc({ name, parent: par }), blocks: doc.blocks } : newNotebook({ name, parent: par, pages: doc.pages });
+        await store.put(rec); records.push(rec);
+      } catch (err) { failed.push([k, err.message]); }
+    }
+  } finally { toast(`Import fertig: ${docs.length - failed.length} von ${docs.length} Dokumenten`, 4000); }
+
+  if (renamed.length || failed.length || skipped.length) {
+    const list = (title, xs) => xs.length ? [h('div', { class: 'form-label' }, title), h('ul', { class: 'import-report' }, xs.map(x => h('li', {}, x)))] : [];
+    await sheet({
+      title: 'Import-Bericht', done: 'OK', cancel: false,
+      body: h('div', { class: 'form' },
+        h('p', { class: 'cal-hint' }, `${docs.length - failed.length} Dokument(e) importiert, ${made.length} Ordner angelegt.`),
+        ...list('Umbenannt (Name gab es schon)', renamed),
+        ...list('Fehlgeschlagen', failed.map(([k, m]) => `${k}: ${m}`)),
+        ...list('Übersprungen', skipped.map(([k, m]) => `${k} (${m})`))),
+    });
+  }
+  renderLibrary();
 }
 
 // Clipboard import. Two kinds of content are understood:
