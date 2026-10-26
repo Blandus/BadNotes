@@ -202,7 +202,11 @@ function renderSidebar() {
         : h('i', { class: 'sb-dot', style: { background: folderColor(f) } }), h('span', {}, f.name)))),
     h('div', { class: 'sb-foot' },
       signedIn()
-        ? h('button', { id: 'sbSync', class: 'sb-sync', title: 'Jetzt synchronisieren', onclick: () => sync(true) },
+        ? h('button', {
+          id: 'sbSync', class: 'sb-sync', title: 'Jetzt synchronisieren',
+          // the sidebar cuts long messages: a tap on a warning shows it in full, then syncs again
+          onclick: () => { if ((settings.syncStatus || '').startsWith('⚠')) toast(settings.syncStatus, 8000); sync(true); },
+        },
           h('span', { class: 'sb-avatar' }, (settings.account?.name || settings.account?.email || 'G')[0].toUpperCase()),
           h('span', { class: 'sb-acc' },
             h('b', {}, settings.account?.name || settings.account?.email || 'Google Drive'),

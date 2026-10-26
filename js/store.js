@@ -2,7 +2,7 @@ import { uid } from './util.js';
 import { toRadius } from './ink.js';
 
 // Shown in the settings, to check which version a device is running. Raise with each update.
-export const APP_VERSION = '48';
+export const APP_VERSION = '49';
 
 export const PAGE_W = 1000;
 export const FORMATS = { a4: { label: 'A4 Hoch', h: 1414 }, a4l: { label: 'A4 Quer', h: 707 }, letter: { label: 'Letter', h: 1294 } };
@@ -70,19 +70,45 @@ function applyLight(full, l) {
 // v3: 'meta' — light copy of every record (kept in step by put/putMany), 'thumbs' — rendered
 // library previews { id, updated, src }.
 let db;
+// iOS/iPadOS closes a web app's database connection while it is in the background (and Safari
+// sometimes loses it otherwise): the next access fails with "Failed to execute 'transaction' on
+// 'IDBDatabase': The database connection is closing" or "Connection to Indexed Database server
+// lost". Then the database is opened again and the operation repeated once.
+const lostConnection = e => e && (e.name === 'InvalidStateError' || e.name === 'UnknownError'
+  || /closing|closed|connection.*lost|server lost/i.test(e.message || ''));
+let reopening = null;
+function reopen() {
+  try { db?.close(); } catch {}
+  db = null;
+  reopening ||= store.open().finally(() => { reopening = null; });
+  return reopening;
+}
+async function retrying(op) {
+  if (!db) await reopen();
+  try { return await op(); } catch (e) {
+    if (!lostConnection(e)) throw e;
+    await reopen();
+    return op();
+  }
+}
+const begin = (names, mode) => db.transaction(names, mode); // throws InvalidStateError on a closed connection
+
 function tx(mode, fn, name = 'notebooks') {
-  return new Promise((res, rej) => {
-    const t = db.transaction(name, mode);
+  return retrying(() => new Promise((res, rej) => {
+    const t = begin(name, mode);
     const req = fn(Array.isArray(name) ? name.map(n => t.objectStore(n)) : t.objectStore(name));
     t.oncomplete = () => res(req?.result);
     t.onerror = () => rej(t.error);
     t.onabort = () => rej(t.error || new Error('Speichern abgebrochen'));
-  });
+  }));
 }
 // Writes full records (or light ones onto the stored full records) and their light copies.
 function write(rs) {
+  return retrying(() => writeOnce(rs));
+}
+function writeOnce(rs) {
   return new Promise((res, rej) => {
-    const t = db.transaction(['notebooks', 'meta'], 'readwrite');
+    const t = begin(['notebooks', 'meta'], 'readwrite');
     const full = t.objectStore('notebooks'), meta = t.objectStore('meta');
     for (const r of rs) {
       if (!r.light) { full.put(r); meta.put(light(r)); continue; }
@@ -125,6 +151,9 @@ export const store = {
         db = r.result;
         // a newer version of the app (other tab) needs the database: let go and reload
         db.onversionchange = () => { db.close(); location.reload(); };
+        // closed by the system (e.g. iOS in the background): reopened on the next access
+        const mine = db;
+        db.onclose = () => { if (db === mine) db = null; };
         try { if (needMeta) await buildMeta(); res(); } catch (err) { rej(err); }
       };
       r.onerror = () => rej(r.error);
@@ -138,13 +167,13 @@ export const store = {
   async count() { return tx('readonly', s => s.count(), 'meta'); },
   // full records one at a time (search, storage overview): fn(record) for each
   each(fn, name = 'notebooks') {
-    return new Promise((res, rej) => {
-      const t = db.transaction(name, 'readonly');
+    return retrying(() => new Promise((res, rej) => {
+      const t = begin(name, 'readonly');
       const cur = t.objectStore(name).openCursor();
       cur.onsuccess = () => { const c = cur.result; if (!c) return; try { fn(name === 'notebooks' ? migrate(c.value) : c.value); } catch {} c.continue(); };
       t.oncomplete = () => res();
       t.onerror = () => rej(t.error);
-    });
+    }));
   },
   async get(id) { const r = await tx('readonly', s => s.get(id)); return r && migrate(r); },
   async put(r) { await write([r]); emit('change', r.id); },
