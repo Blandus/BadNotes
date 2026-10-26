@@ -5,6 +5,7 @@ import { store, settings, saveSettings, emit, migrate, light } from './store.js'
 import { uid } from './util.js';
 import { merge3, mergeable } from './merge.js';
 import { makeStub, withMeta, runOffload, configureOffload } from './offload.js';
+import { configurePdf, filesOf } from './pdfdoc.js';
 
 const drive = { token: null, exp: 0, busy: false };
 export const tokenValid = () => drive.token && Date.now() < drive.exp - 60000;
@@ -14,6 +15,7 @@ let isLocked = () => false;
 export function configureSync(opts) {
   beforeSync = opts.beforeSync; isLocked = opts.isLocked;
   configureOffload({ fetchRecord, signedIn, isOpen: opts.isOpen || (() => false) });
+  configurePdf({ fetchFile: id => (signedIn() ? fetchFile(id) : Promise.resolve(null)) });
 }
 
 // One record straight from Drive (for documents kept only there, see offload.js).
@@ -153,16 +155,59 @@ async function pushIfUnchanged(rec, folders, expected) {
   const meta = cur
     ? { appProperties: { updated: String(rec.updated) } }
     : { name: rec.id + '.json', parents: [folders[0]], appProperties: { updated: String(rec.updated) } };
+  const json = new Blob([JSON.stringify(rec)], { type: 'application/json' });
+  if (json.size > 5e6) { await uploadBlob(meta, json, cur?.id); return true; } // large: resumable upload
   const b = 'bnd' + uid();
   // Blob parts instead of one concatenated string: a large document is held as text only once
   const body = new Blob([`--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
-    `--${b}\r\nContent-Type: application/json\r\n\r\n`, JSON.stringify(rec), `\r\n--${b}--`]);
+    `--${b}\r\nContent-Type: application/json\r\n\r\n`, json, `\r\n--${b}--`]);
   await gapi(`https://www.googleapis.com/upload/drive/v3/files${cur ? '/' + cur.id : ''}?uploadType=multipart&fields=id`, {
     method: cur ? 'PATCH' : 'POST',
     headers: { 'Content-Type': 'multipart/related; boundary=' + b },
     body,
   });
   return true;
+}
+
+// ---------- Original PDF files (pdfdoc.js) ----------
+// Stored once per file as "<id>.pdf" in the app folder (appProperties folioFile = id), uploaded
+// before the first document that uses it, loaded on other devices when a page is first shown.
+// Files over 5 MB go through Drive's resumable upload (as Drive's upload guide recommends).
+async function uploadBlob(meta, blob, existingId) {
+  const r = await gapi(`https://www.googleapis.com/upload/drive/v3/files${existingId ? '/' + existingId : ''}?uploadType=resumable&fields=id`, {
+    method: existingId ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Type': blob.type || 'application/octet-stream', 'X-Upload-Content-Length': String(blob.size) },
+    body: JSON.stringify(meta),
+  });
+  const session = r.headers.get('Location');
+  if (!session) throw new Error('Drive: kein Upload-Ziel erhalten');
+  const put = await fetch(session, { method: 'PUT', body: blob });
+  if (!put.ok) throw new Error(`Drive-Upload ${put.status}`);
+}
+let appFolders = null; // set at each sync run
+async function driveFileFor(id, folders) {
+  return (await listFiles(`name='${id}.pdf' and ${inFolders(folders)} and trashed=false`))[0] || null;
+}
+// all PDF files of rec in Drive (uploaded if needed). Throws if one can't be uploaded.
+async function ensureFilesUploaded(rec, folders) {
+  for (const id of filesOf(rec)) {
+    const e = await store.getFile(id);
+    if (!e || e.uploaded) continue;
+    if (!e.blob) continue; // not on this device (came from elsewhere): already in Drive
+    if (!(await driveFileFor(id, folders))) {
+      await uploadBlob({ name: id + '.pdf', parents: [folders[0]], mimeType: 'application/pdf', appProperties: { folioFile: id } }, e.blob);
+    }
+    await store.putFile({ ...e, uploaded: true });
+  }
+}
+// The bytes of a PDF file from Drive (pages of a document imported on another device).
+async function fetchFile(id) {
+  await getToken(false).catch(() => getToken(true));
+  const folders = appFolders || await findFolders();
+  const f = await driveFileFor(id, folders);
+  if (!f) return null;
+  const r = await gapi(`files/${f.id}?alt=media`);
+  return new Blob([await r.arrayBuffer()], { type: 'application/pdf' });
 }
 
 const trash = id => gapi(`files/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) });
@@ -173,7 +218,7 @@ const trash = id => gapi(`files/${id}`, { method: 'PATCH', headers: { 'Content-T
 // remembers its notebook and version (appProperties gnFor / updated). A copy is rebuilt once its
 // notebook has not changed for a minute, renamed with it, and trashed when the notebook is
 // deleted. Building is slow (backgrounds are rendered), so only a few are built per sync run.
-const GN_FOLDER = 'Goodnotes', GN_QUIET_MS = 60000, GN_PER_RUN = 3;
+const GN_FOLDER = 'Goodnotes', GN_QUIET_MS = 60000, GN_PER_RUN = 3, GN_MAX_PAGES = 60;
 const gnName = r => (r.name || 'Folio').replace(/[\\/:*?"<>|]/g, '_') + '.goodnotes';
 
 async function gnFolder(parent) {
@@ -203,6 +248,9 @@ export async function syncGoodnotesCopies(folders, local) {
   let built = 0;
   for (const r of local.values()) {
     if (r.kind !== 'notebook' && r.kind !== 'textdoc') continue;
+    // A copy renders every page into one file in memory: long documents (textbooks) are left
+    // out, an iPad could not hold it. Their PDF is in Drive anyway.
+    if ((r.pageCount ?? r.pages?.length ?? 0) > GN_MAX_PAGES) continue;
     const copy = copies.get(r.id);
     if (r.deleted || r.trashed) { if (copy) await trash(copy.id); continue; }
     if (copy && (rUpd(copy) >= r.updated || r.offloaded)) {
@@ -280,8 +328,8 @@ export async function sync(interactive) {
     }
     setStatus('Synchronisiere…');
     await beforeSync();
-    const folders = await findFolders();
-    // only record files (the folder also holds the "Goodnotes" sub-folder)
+    const folders = appFolders = await findFolders();
+    // only record files (the folder also holds the "Goodnotes" sub-folder and the <id>.pdf files)
     const { byId: remote, dupes } = pickNewest((await listFiles(`${inFolders(folders)} and trashed=false`)).filter(f => f.name.endsWith('.json')));
 
     // Light records only (no pages/images): a full document is loaded just when it has to be
@@ -297,6 +345,7 @@ export async function sync(interactive) {
       if (rec.offloaded) return false; // a stub is never uploaded (its changes go onto the Drive version below)
       if (rec.light) rec = await store.get(rec.id);
       if (!rec || rec.offloaded) return false;
+      await ensureFilesUploaded(rec, folders); // its PDF files first, so other devices find them
       if (!(await pushIfUnchanged(rec, folders, remoteUpd.has(rec.id) ? remoteUpd.get(rec.id) : null))) return false;
       remoteUpd.set(rec.id, rec.updated); await store.putBase(rec); up++;
       return true;

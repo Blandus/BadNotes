@@ -2,51 +2,15 @@ import { PAGE_W } from './store.js';
 import { renderPage, pageH } from './render.js';
 import { uid, readAsDataURL } from './util.js';
 import { toast } from './ui.js';
+import { pdfFileToPages } from './pdfdoc.js';
 
-const WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-
-// Renders each PDF page to a JPEG background of a new note page.
+// Pages of a new notebook from a PDF. The PDF itself is stored once and the pages refer to it
+// (pdfdoc.js): nothing is converted to images, so even a 450-page textbook stays a small
+// document. The text of each page is kept for search and name suggestions.
 export async function pdfToPages(file) {
-  const pdfjs = window.pdfjsLib;
-  if (!pdfjs) throw new Error('PDF-Bibliothek nicht geladen (offline?)');
-  pdfjs.GlobalWorkerOptions.workerSrc = WORKER;
-  const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
-  try {
-  const pages = [];
-  // long books get a slightly smaller page image (still sharp for reading): keeps them at a size
-  // the device can hold and sync
-  const width = doc.numPages > 150 ? 1200 : 1600;
-  for (let i = 1; i <= doc.numPages; i++) {
-    toast(`PDF wird importiert: Seite ${i} von ${doc.numPages}`, 0);
-    const p = await doc.getPage(i);
-    const vp1 = p.getViewport({ scale: 1 });
-    const vp = p.getViewport({ scale: width / vp1.width });
-    const c = document.createElement('canvas');
-    c.width = Math.round(vp.width); c.height = Math.round(vp.height);
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
-    // 'print' intent renders without requestAnimationFrame (works in background tabs too)
-    await p.render({ canvasContext: ctx, viewport: vp, intent: 'print' }).promise;
-    const page = { id: uid(), template: 'blank', bg: c.toDataURL('image/jpeg', 0.85), h: Math.round(PAGE_W * vp1.height / vp1.width), elements: [] };
-    // Keep the PDF's text (for search and name suggestions); the page itself is only an image.
-    try {
-      const { text, title } = await pageText(p);
-      if (text) page.pdfText = text;
-      if (i === 1 && title) page.pdfTitle = title;
-    } catch {}
-    pages.push(page);
-    c.width = c.height = 0; // free the canvas memory now (Safari keeps it until GC otherwise)
-    p.cleanup();
-  }
-  try {
-    const meta = (await doc.getMetadata())?.info?.Title?.trim();
-    if (meta && pages[0]) pages[0].pdfMetaTitle = meta;
-  } catch {}
+  const pages = await pdfFileToPages(file, { pageText, progress: (i, n) => toast(`PDF wird importiert: Seite ${i} von ${n}`, 0) });
   toast(`${pages.length} ${pages.length === 1 ? 'Seite' : 'Seiten'} importiert`);
   return pages;
-  } finally {
-    doc.destroy(); // pdf.js otherwise keeps every imported PDF (and its worker data) in memory
-  }
 }
 
 // Text of one PDF page (max. 4000 chars) and its "title": the line in the largest font
@@ -81,13 +45,18 @@ export async function loadImageFile(file, max = 1600) {
 
 const safeName = n => (n || 'Folio').replace(/[\\/:*?"<>|]/g, '_');
 
+export const MAX_EXPORT_PAGES = 500;
 export async function exportPdf(doc, pages = doc.pages) {
   const { jsPDF } = window.jspdf || {};
   if (!jsPDF) return toast('PDF-Bibliothek nicht geladen (offline?)');
-  toast('PDF wird erstellt…', 0);
+  // the whole PDF is built in memory: long documents get smaller page images, very long ones
+  // are refused (an iPad would run out of memory) — export single pages or a range instead
+  if (pages.length > MAX_EXPORT_PAGES) return toast(`Zu lang für den Export auf einmal (${pages.length} Seiten, höchstens ${MAX_EXPORT_PAGES}).`, 5000);
+  const long = pages.length > 100, s = long ? 1.1 : 1.6, q = long ? 0.75 : 0.9;
   let pdf;
-  for (const page of pages) {
-    const h = pageH(page), s = 1.6;
+  for (const [i, page] of pages.entries()) {
+    toast(`PDF wird erstellt: Seite ${i + 1} von ${pages.length}`, 0);
+    const h = pageH(page);
     const c = document.createElement('canvas');
     c.width = PAGE_W * s; c.height = Math.round(h * s);
     await renderPage(c.getContext('2d'), page, s);
@@ -95,7 +64,8 @@ export async function exportPdf(doc, pages = doc.pages) {
     const orient = fmt[0] > fmt[1] ? 'l' : 'p';
     if (!pdf) pdf = new jsPDF({ unit: 'pt', format: fmt, orientation: orient });
     else pdf.addPage(fmt, orient);
-    pdf.addImage(c.toDataURL('image/jpeg', 0.9), 'JPEG', 0, 0, fmt[0], fmt[1]);
+    pdf.addImage(c.toDataURL('image/jpeg', q), 'JPEG', 0, 0, fmt[0], fmt[1]);
+    c.width = c.height = 0;
   }
   pdf.save(safeName(doc.name) + '.pdf');
   toast('PDF exportiert');

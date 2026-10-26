@@ -2,6 +2,7 @@ import { PAGE_W, PAPERS } from './store.js';
 import { r1 } from './util.js';
 import { fillStroke } from './ink.js';
 import { layout, drawRich, LINE_H } from './richtext.js';
+import { drawPdfPage } from './pdfdoc.js';
 
 export const pageH = p => p.h || 1414;
 export const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif';
@@ -129,6 +130,17 @@ export async function renderPage(ctx, page, scale, hideId, ox = 0, oy = 0) {
   ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
   ctx.fillStyle = paperColor(page); ctx.fillRect(0, 0, PAGE_W, h);
   if (page.bg && imgs.get(page.bg)) ctx.drawImage(imgs.get(page.bg), 0, 0, PAGE_W, h);
+  if (page.pdf && !(await drawPdfPage(ctx, page, scale, ox, oy))) {
+    // the original PDF is not on this device and can't be loaded right now
+    ctx.setTransform(scale, 0, 0, scale, ox, oy);
+    ctx.fillStyle = '#EEF1F5'; ctx.fillRect(0, 0, PAGE_W, h);
+    ctx.fillStyle = '#7A8597'; ctx.font = `28px ${FONT}`; ctx.textAlign = 'center';
+    ctx.fillText('PDF-Seite wird aus Google Drive geladen …', PAGE_W / 2, h / 2 - 18);
+    ctx.font = `22px ${FONT}`;
+    ctx.fillText('(braucht Internet und Google-Anmeldung)', PAGE_W / 2, h / 2 + 20);
+    ctx.textAlign = 'start';
+  }
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
   drawTemplate(ctx, page.template, h, page.paper === 'dark');
   for (const e of page.elements) {
     if (e.id === hideId) continue;

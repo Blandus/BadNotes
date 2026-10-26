@@ -20,6 +20,7 @@ import { PAGE_W, newPage } from './store.js';
 import { uid, r1 } from './util.js';
 import { toast } from './ui.js';
 import { loadYjs } from './textdoc.js';
+import { savePdfFile } from './pdfdoc.js';
 
 // ---------- ZIP (central directory + DecompressionStream) ----------
 // Same as unzip, but reads a File/Blob piece by piece: only the directory at the end is read up
@@ -290,23 +291,6 @@ async function sheetElements(bytes, k, imageSrc) {
   return [...els.filter(e => e.type === 'image'), ...els.filter(e => e.type !== 'image')];
 }
 
-// ---------- Background PDF pages ----------
-const pdfCache = new Map();
-async function pdfPageImage(bytes, n, key) {
-  const pdfjs = window.pdfjsLib;
-  if (!pdfjs) throw new Error('PDF-Bibliothek nicht geladen (offline?)');
-  pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-  if (!pdfCache.has(key)) pdfCache.set(key, pdfjs.getDocument({ data: bytes.slice() }).promise);
-  const doc = await pdfCache.get(key);
-  const p = await doc.getPage(Math.min(Math.max(1, n || 1), doc.numPages));
-  const vp1 = p.getViewport({ scale: 1 }), vp = p.getViewport({ scale: 1600 / vp1.width });
-  const c = document.createElement('canvas');
-  c.width = Math.round(vp.width); c.height = Math.round(vp.height);
-  const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
-  await p.render({ canvasContext: ctx, viewport: vp, intent: 'print' }).promise;
-  return c.toDataURL('image/jpeg', 0.85);
-}
-
 // ---------- Text documents ----------
 // Document type 5 (record 30, field 15). Its one notes file holds an element with field 13:
 // 10 = a Yjs update of a slate-yjs document (root XmlText "content"; every Slate element is an
@@ -416,6 +400,7 @@ async function convertGoodnotes(file) {
   }
 
   const pages = [];
+  const pdfFiles = new Map(); // attachment path → stored file id (each PDF once, however many pages use it)
   for (const [i, s] of ordered.entries()) {
     toast(`Goodnotes-Import: Seite ${i + 1} von ${ordered.length}`, 0);
     const bg = bgs.get(s.bg) || { w: 595, h: 842 };
@@ -424,8 +409,11 @@ async function convertGoodnotes(file) {
     if (bg.att) {
       const path = attIdx.get(bg.att) || (attFile.get(bg.att) && `attachments/${attFile.get(bg.att)}`);
       const bytes = path && await read(path);
-      if (bytes && bytes[0] === 0x25 && bytes[1] === 0x50) { // %P(DF)
-        try { page.bg = await pdfPageImage(bytes, bg.page, path); } catch {}
+      if (bytes && bytes[0] === 0x25 && bytes[1] === 0x50) { // %P(DF): kept as the original file (pdfdoc.js)
+        try {
+          if (!pdfFiles.has(path)) pdfFiles.set(path, savePdfFile(new Blob([bytes], { type: 'application/pdf' }), path.split('/').pop()));
+          page.pdf = { file: await pdfFiles.get(path), n: bg.page || 1 };
+        } catch {}
       }
     }
     const nid = notesFor(s.id);
@@ -441,12 +429,5 @@ async function convertGoodnotes(file) {
   // Apple stores "Ü" as U + combining diaeresis; normalise so search and sorting work
   return { name: title.normalize('NFC'), pages };
 }
-// Converts one .goodnotes file. Afterwards the PDFs opened for its backgrounds are closed again
-// (pdf.js would otherwise keep each one in memory for the rest of the session).
-export async function goodnotesToNotebook(file) {
-  try { return await convertGoodnotes(file); }
-  finally {
-    for (const p of pdfCache.values()) p.then(d => d.destroy()).catch(() => {});
-    pdfCache.clear();
-  }
-}
+// Converts one .goodnotes file. PDF backgrounds are kept as their original files (pdfdoc.js).
+export const goodnotesToNotebook = file => convertGoodnotes(file);

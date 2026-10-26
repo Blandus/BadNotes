@@ -2,7 +2,7 @@ import { uid } from './util.js';
 import { toRadius } from './ink.js';
 
 // Shown in the settings, to check which version a device is running. Raise with each update.
-export const APP_VERSION = '49';
+export const APP_VERSION = '50';
 
 export const PAGE_W = 1000;
 export const FORMATS = { a4: { label: 'A4 Hoch', h: 1414 }, a4l: { label: 'A4 Quer', h: 707 }, letter: { label: 'Letter', h: 1294 } };
@@ -53,7 +53,15 @@ const CONTENT_KEYS = ['pages', 'blocks'];
 export function light(r) {
   const out = { light: true };
   for (const k in r) if (!CONTENT_KEYS.includes(k)) out[k] = r[k];
-  if (r.kind === 'notebook' || (!r.kind && r.pages)) out.pageCount = r.offloaded ? r.pageCount : (r.pages || []).length;
+  if (r.kind === 'notebook' || (!r.kind && r.pages)) {
+    out.pageCount = r.offloaded ? r.pageCount : (r.pages || []).length;
+    // original PDF files the pages are drawn from (pdfdoc.js); a stub keeps its own list
+    if (!r.offloaded) {
+      const files = new Set();
+      for (const p of r.pages || []) if (p.pdf?.file) files.add(p.pdf.file);
+      if (files.size) out.pdfFiles = [...files]; else delete out.pdfFiles;
+    }
+  }
   return out;
 }
 // a light record put onto the stored full one
@@ -68,7 +76,7 @@ function applyLight(full, l) {
 // v1: 'notebooks' (full records). v2: 'bases' — per record the version this device last agreed
 // on with Google Drive (base of the three-way merge in sync.js); never shown, never uploaded.
 // v3: 'meta' — light copy of every record (kept in step by put/putMany), 'thumbs' — rendered
-// library previews { id, updated, src }.
+// library previews { id, updated, src }. v4: 'files' — original PDFs (pdfdoc.js).
 let db;
 // iOS/iPadOS closes a web app's database connection while it is in the background (and Safari
 // sometimes loses it otherwise): the next access fails with "Failed to execute 'transaction' on
@@ -138,7 +146,7 @@ function buildMeta() {
 export const store = {
   open() {
     return new Promise((res, rej) => {
-      const r = indexedDB.open('notizen', 3);
+      const r = indexedDB.open('notizen', 4);
       let needMeta = false;
       r.onupgradeneeded = () => {
         const d = r.result;
@@ -146,6 +154,7 @@ export const store = {
         if (!d.objectStoreNames.contains('bases')) d.createObjectStore('bases', { keyPath: 'id' });
         if (!d.objectStoreNames.contains('meta')) { d.createObjectStore('meta', { keyPath: 'id' }); needMeta = true; }
         if (!d.objectStoreNames.contains('thumbs')) d.createObjectStore('thumbs', { keyPath: 'id' });
+        if (!d.objectStoreNames.contains('files')) d.createObjectStore('files', { keyPath: 'id' });
       };
       r.onsuccess = async () => {
         db = r.result;
@@ -178,6 +187,13 @@ export const store = {
   async get(id) { const r = await tx('readonly', s => s.get(id)); return r && migrate(r); },
   async put(r) { await write([r]); emit('change', r.id); },
   async putMany(rs) { if (rs.length) await write(rs); emit('change', null); },
+  // original PDF files { id, blob (null when kept only in Drive), size, name, uploaded, created }
+  async getFile(id) { return tx('readonly', s => s.get(id), 'files'); },
+  async putFile(f) { await tx('readwrite', s => s.put(f), 'files'); },
+  async deleteFile(id) { await tx('readwrite', s => s.delete(id), 'files'); },
+  async listFiles() { // without the bytes: the Blob handles stay on disk until read
+    return tx('readonly', s => s.getAll(), 'files');
+  },
   // rendered library previews
   async getThumb(id) { return tx('readonly', s => s.get(id), 'thumbs'); },
   async putThumb(t) { await tx('readwrite', s => s.put(t), 'thumbs'); },

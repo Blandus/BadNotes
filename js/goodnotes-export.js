@@ -473,7 +473,11 @@ async function textDocToGoodnotes(doc, { quiet = false } = {}) {
   return new Blob([zip(files)], { type: 'application/octet-stream' });
 }
 
+// The .goodnotes file is built in memory with an image of every page: long documents are refused
+// (instead of the app running out of memory on an iPad).
+export const MAX_GN_PAGES = 150;
 export async function exportGoodnotes(doc) {
+  if ((doc.pages?.length || 0) > MAX_GN_PAGES) return toast(`Zu lang für den Goodnotes-Export (${doc.pages.length} Seiten, höchstens ${MAX_GN_PAGES}). Als PDF exportieren geht.`, 5000);
   try {
     const blob = await notebookToGoodnotes(doc);
     const name = (doc.name || 'Folio').replace(/[\\/:*?"<>|]/g, '_') + '.goodnotes';

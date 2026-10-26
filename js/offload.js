@@ -46,7 +46,11 @@ async function thumbOf(r) {
 export async function makeStub(r) {
   const key = CONTENT[r.kind];
   const stub = { ...r, [key]: [], offloaded: true, remoteUpd: r.updated, size: recordSize(r), thumb: await thumbOf(r) };
-  if (r.kind === 'notebook') stub.pageCount = r.pages.length;
+  if (r.kind === 'notebook') {
+    stub.pageCount = r.pages.length;
+    const files = new Set(r.pages.map(p => p.pdf?.file).filter(Boolean));
+    if (files.size) stub.pdfFiles = [...files];
+  }
   return stub;
 }
 // Metadata changes of a stub, put onto the full version from Drive.
@@ -107,13 +111,30 @@ export async function runOffload({ force = false } = {}) {
   lastRun = Date.now();
   const min = offloadMin();
   let n = 0;
-  for (const r of await store.list()) {
-    if (!CONTENT[r.kind] || r.offloaded || r.deleted || r.favorite) continue;
+  const all = await store.list();
+  for (const r of all) {
+    if (!CONTENT[r.kind] || r.deleted || r.favorite) continue;
     if (hooks.isOpen(r.id) || Date.now() - (r.opened || 0) < RECENT_MS) continue;
+    // its original PDFs (pdfdoc.js): the local copy goes once the file is safely in Drive
+    for (const id of r.pdfFiles || []) {
+      const f = await store.getFile(id);
+      if (f?.blob && f.uploaded && f.size >= min) { await store.putFile({ ...f, blob: null }); n++; }
+    }
+    if (r.offloaded) continue;
     const full = await store.get(r.id);
     if (!full || recordSize(full) < min) continue;
     if (await offload(full)) n++;
   }
+  // PDF files no document refers to any more (deleted for good more than a day ago)
+  const used = new Set(all.flatMap(r => r.pdfFiles || []));
+  for (const f of await store.listFiles()) if (!used.has(f.id) && Date.now() - (f.created || 0) > 86400000) await store.deleteFile(f.id);
   if (n) emit('change', null);
   return n;
+}
+
+// Favourites stay on the device, including their PDF files.
+export async function keepFilesLocal(r) {
+  if (!r?.pdfFiles?.length || !hooks.signedIn()) return;
+  const { fetchFileNow } = await import('./pdfdoc.js');
+  for (const id of r.pdfFiles) { try { await fetchFileNow(id); } catch {} }
 }

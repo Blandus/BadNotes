@@ -9,7 +9,7 @@ import { suggestNames } from './suggest.js';
 import { sync, signIn, signOut, signedIn } from './sync.js';
 import { newTextDoc, openTextDoc, renderTextThumb, plainText, printDoc } from './textdoc.js';
 import { renderCalendar, CAL_KINDS } from './calendar.js';
-import { ensureLocal, offload, runOffload, recordSize, offloadOn, offloadMin, OFFLOAD_SIZES } from './offload.js';
+import { ensureLocal, offload, runOffload, recordSize, offloadOn, offloadMin, OFFLOAD_SIZES, keepFilesLocal } from './offload.js';
 
 const SECTIONS = {
   docs: { label: 'Alle Notizen', icon: 'notes' },
@@ -543,8 +543,8 @@ function itemMenu(r, anchor) {
 async function update(r, patch) {
   Object.assign(r, patch, { updated: Date.now() });
   await store.put(r);
-  // favourites stay on the device: one that was kept only in Drive is loaded now
-  if (patch.favorite && r.offloaded) ensureLocal(r);
+  // favourites stay on the device: one that was kept only in Drive is loaded now, with its PDFs
+  if (patch.favorite) (r.offloaded ? ensureLocal(r) : Promise.resolve()).then(() => keepFilesLocal(r));
 }
 async function offloadNow(r) {
   if (await offload(r)) toast(`„${r.name}“ liegt jetzt nur in Google Drive (${fmtBytes((await store.getMeta(r.id))?.size || 0)} frei)`, 3500);
@@ -1198,6 +1198,8 @@ function storageBox() {
       docs.push({ id: r.id, name: r.name, kind: r.kind, offloaded: r.offloaded, size: r.size });
     });
     try { await store.each(r => { baseBytes += size(r); }, 'bases'); } catch {}
+    let pdfLocal = 0, pdfDrive = 0, pdfN = 0;
+    try { for (const f of await store.listFiles()) { pdfN++; if (f.blob) pdfLocal += f.size || 0; else pdfDrive += f.size || 0; } } catch {}
     let appBytes = 0;
     try { for (const k of await caches.keys()) { const c = await caches.open(k); for (const req of await c.keys()) appBytes += (await (await c.match(req)).blob()).size; } } catch {}
     let est = null;
@@ -1208,6 +1210,8 @@ function storageBox() {
       stubs.length ? row('Nur in Google Drive', fmtBytes(stubs.reduce((s, r) => s + (r.size || 0), 0)), `(${stubs.length} Dokument${stubs.length === 1 ? '' : 'e'}, hier nicht belegt)`) : null,
       est?.usage != null ? row('Belegt auf diesem Gerät', fmtBytes(est.usage), est.quota ? `(von max. ${fmtBytes(est.quota)})` : '') : row('Belegt auf diesem Gerät', 'nicht verfügbar'),
       row('Notizen und Dokumente', fmtBytes(docBytes), `(${docs.filter(r => r.kind !== 'folder').length})`),
+      pdfLocal ? row('Original-PDFs', fmtBytes(pdfLocal), `(${pdfN} Datei${pdfN === 1 ? '' : 'en'})`) : null,
+      pdfDrive ? row('PDFs nur in Google Drive', fmtBytes(pdfDrive), '(hier nicht belegt)') : null,
       baseBytes ? row('Sync-Abgleichstand', fmtBytes(baseBytes)) : null,
       calBytes ? row('Kalender', fmtBytes(calBytes)) : null,
       appBytes ? row('App (offline)', fmtBytes(appBytes)) : null,

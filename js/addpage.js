@@ -28,11 +28,11 @@ export function addPageMenu(anchor, ctx) {
   const add = pages => { closePopover(); if (pages?.length) ctx.insert(pages, at()); };
   // "current template": same paper, size and template as this page (a PDF page → blank page of its size)
   const h0 = pageH(cur);
-  const curTemplate = cur?.bg ? 'blank' : cur?.template || 'blank';
+  const curTemplate = (cur?.bg || cur?.pdf) ? 'blank' : cur?.template || 'blank';
   const quick = [
     ['Aktuelle Vorlage', () => newPage(curTemplate, h0, cur?.paper)],
-    ['Leer', () => newPage('blank', h0, cur?.bg ? undefined : cur?.paper)],
-    ['Liniert schmal', () => newPage('narrow', h0, cur?.bg ? undefined : cur?.paper)],
+    ['Leer', () => newPage('blank', h0, (cur?.bg || cur?.pdf) ? undefined : cur?.paper)],
+    ['Liniert schmal', () => newPage('narrow', h0, (cur?.bg || cur?.pdf) ? undefined : cur?.paper)],
   ];
   const tile = ([label, make]) => {
     const cv = h('canvas'); renderThumb(cv, make(), 200);
@@ -115,8 +115,8 @@ function templateWindow(ctx, cur, insert) {
   const curH = cur ? pageH(cur) : 1414;
   const o = {
     tab: 'paper',
-    template: cur && !cur.bg && cur.template in TEMPLATES ? cur.template : (settings.lastTemplate in TEMPLATES ? settings.lastTemplate : 'lined'),
-    paper: cur && !cur.bg && cur.paper in PAPERS ? cur.paper : 'white',
+    template: cur && !cur.bg && !cur.pdf && cur.template in TEMPLATES ? cur.template : (settings.lastTemplate in TEMPLATES ? settings.lastTemplate : 'lined'),
+    paper: cur && !cur.bg && !cur.pdf && cur.paper in PAPERS ? cur.paper : 'white',
     orient: curH < PAGE_W ? 'landscape' : 'portrait',
     size: 'a4', custom: [210, 297],
     cover: ctx.doc.cover || COVERS[1],
