@@ -1183,3 +1183,18 @@ button.sz-row:hover { background: var(--surface-3); }
 .clipboard-sheet .sheet-head { grid-template-columns: auto minmax(0, 1fr); }
 .clipboard-sheet .sheet-title { text-align: center; overflow-wrap: anywhere; }
 .clipboard-sheet .sheet-head > :last-child { display: none; }
+.storage-box { display: flex; flex-direction: column; gap: 6px; }
+.storage-row { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; }
+.storage-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.storage-row b { flex: none; font-variant-numeric: tabular-nums; }
+.storage-box .form-label { margin-top: 6px; }
+
+/* documents kept only in Google Drive */
+.stub-thumb { width: auto; height: 100%; max-width: 100%; object-fit: contain; display: block; }
+.stub-thumb.empty { width: 110px; height: 150px; display: flex; align-items: center; justify-content: center; color: var(--text-3); background: var(--surface-2); }
+.cloud-badge { position: absolute; bottom: 6px; right: 8px; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--surface); color: var(--accent); box-shadow: var(--shadow-sm); }
+.cloud-inline { display: inline-flex; color: var(--accent); }
+.row-title .cloud-inline svg { color: var(--accent); }
+.offload-size { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; }
+.offload-size[hidden] { display: none; }
+.tile .thumb img.paper { border-radius: 4px; box-shadow: 0 0 0 1px var(--sep), 0 2px 8px rgba(15, 39, 71, .10); background: #fff; }

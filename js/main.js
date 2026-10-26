@@ -77,7 +77,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   await store.open();
   initEditor();
   initTools();
-  configureSync({ beforeSync: flushSave, isLocked: id => isLocked(id) || textLocked(id) });
+  configureSync({ beforeSync: flushSave, isLocked: id => isLocked(id) || textLocked(id), isOpen: id => ed.tabs.some(t => t.id === id) || settings.openText === id });
   bus.addEventListener('change', scheduleSync);
   await seed();
   if (settings.openText) openTextDoc(settings.openText);

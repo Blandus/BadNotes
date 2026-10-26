@@ -8,6 +8,7 @@ import { suggestNames } from './suggest.js';
 import { renderLibrary, templatePicker, openSettings, showConflicts } from './library.js';
 import { clearSelection, renderSelection, finishText, selectIds, hasSelection, deleteSelection } from './tools.js';
 import { addPageMenu as openAddPage } from './addpage.js';
+import { ensureLocal } from './offload.js';
 
 // Page canvases only need to look fine while scrolling; the detail layer provides sharpness.
 // Keeping them smaller saves iPad memory and makes each re-render faster.
@@ -104,7 +105,11 @@ export async function activateTab(key, page) {
   await flushSave();
   saveView();
   const same = !view.hidden && ed.doc?.id === tab.id;
-  const doc = same ? ed.doc : await store.get(tab.id);
+  let doc = same ? ed.doc : await store.get(tab.id);
+  if (doc?.offloaded) { // kept only in Google Drive: load it first
+    doc = await ensureLocal(doc);
+    if (!doc) { ed.tabs = ed.tabs.filter(t => t.id !== tab.id); persistTabs(); if (view.hidden) renderLibrary(); return; }
+  }
   if (!doc || doc.deleted || doc.trashed) {
     ed.tabs = ed.tabs.filter(t => t.id !== tab.id); persistTabs();
     return toast('Dokument nicht gefunden');

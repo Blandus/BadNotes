@@ -9,6 +9,7 @@ import { suggestNames } from './suggest.js';
 import { sync, signIn, signOut, signedIn } from './sync.js';
 import { newTextDoc, openTextDoc, renderTextThumb, plainText, printDoc } from './textdoc.js';
 import { renderCalendar, CAL_KINDS } from './calendar.js';
+import { ensureLocal, offload, runOffload, recordSize, offloadOn, offloadMin, OFFLOAD_SIZES } from './offload.js';
 
 const SECTIONS = {
   docs: { label: 'Alle Notizen', icon: 'notes' },
@@ -267,6 +268,9 @@ function thumbFor(r, width) {
     const count = live().filter(x => x.parent === r.id && !x.trashed).length;
     return folderArt(r, count);
   }
+  if (r.offloaded && !r.cover) { // kept only in Drive: the small preview saved with the stub
+    return r.thumb ? h('img', { class: 'paper stub-thumb', src: r.thumb, alt: '' }) : h('div', { class: 'paper stub-thumb empty' }, icon('cloud', 28));
+  }
   const c = h('canvas', { class: r.cover ? 'cover' : 'paper' });
   if (r.kind === 'textdoc') { renderTextThumb(c, r, width * 2); return c; }
   if (r.cover) renderCover(c, r.cover, width * 2);
@@ -314,7 +318,8 @@ function tile(r) {
     h('button', { class: 'thumb', onclick: () => activate(r), 'aria-label': r.name }, thumbFor(r, 125),
       lib.selecting ? h('span', { class: 'checkmark' }, lib.selected.has(r.id) ? icon('check', 16) : '') : null,
       r.favorite ? h('span', { class: 'fav-badge' }, icon('starFill', 14)) : null,
-      r.conflicts?.length ? h('span', { class: 'conflict-badge', title: 'Sync-Hinweis: auf mehreren Geräten geändert' }, '!') : null),
+      r.conflicts?.length ? h('span', { class: 'conflict-badge', title: 'Sync-Hinweis: auf mehreren Geräten geändert' }, '!') : null,
+      r.offloaded ? h('span', { class: 'cloud-badge', title: 'Nur in Google Drive – wird beim Öffnen geladen' }, icon('cloud', 15)) : null),
     h('div', { class: 'tile-meta' },
       h('div', { class: 'tile-text' },
         h('div', { class: 'tile-title' }, h('span', { title: r.name }, r.name)),
@@ -330,8 +335,8 @@ function row(r) {
     h('button', { class: 'row-hit', onclick: () => activate(r) },
       h('div', { class: 'row-thumb' }, thumbFor(r, 40)),
       h('div', { class: 'row-main' },
-        h('div', { class: 'row-title' }, r.name, r.favorite ? icon('starFill', 12) : '', r.conflicts?.length ? h('span', { class: 'conflict-badge inline', title: 'Sync-Hinweis: auf mehreren Geräten geändert' }, '!') : ''),
-        h('div', { class: 'row-sub' }, sub(r) + (r.kind === 'notebook' ? ` · ${r.pages.length} ${r.pages.length === 1 ? 'Seite' : 'Seiten'}` : r.kind === 'textdoc' ? ' · Textdokument' : ''))),
+        h('div', { class: 'row-title' }, r.name, r.favorite ? icon('starFill', 12) : '', r.offloaded ? h('span', { class: 'cloud-inline', title: 'Nur in Google Drive' }, icon('cloud', 14)) : '', r.conflicts?.length ? h('span', { class: 'conflict-badge inline', title: 'Sync-Hinweis: auf mehreren Geräten geändert' }, '!') : ''),
+        h('div', { class: 'row-sub' }, sub(r) + (r.kind === 'notebook' ? ` · ${r.pageCount ?? r.pages.length} ${(r.pageCount ?? r.pages.length) === 1 ? 'Seite' : 'Seiten'}` : r.kind === 'textdoc' ? ' · Textdokument' : '') + (r.offloaded ? ' · nur in Google Drive' : ''))),
       lib.selecting ? h('span', { class: 'checkmark' }, lib.selected.has(r.id) ? icon('check', 16) : '') : null),
     lib.selecting ? null : h('button', { class: 'chev', title: 'Optionen', 'aria-label': 'Optionen', onclick: e => itemMenu(r, e.currentTarget) }, icon('dots', 18)));
   if (r.kind === 'folder' && !r.trashed) el.dataset.drop = r.id;
@@ -456,25 +461,38 @@ function itemMenu(r, anchor) {
     ]);
   }
   const nb = r.kind === 'notebook', text = r.kind === 'textdoc', doc = nb || text;
+  // actions that need the content: load it from Drive first if the document is kept only there
+  const full = fn => async () => { const d = await ensureLocal(r); if (d) fn(d); };
   menu(at, [
     doc && { label: 'Öffnen', icon: 'doc', action: () => activate(r) },
     { label: 'Umbenennen', icon: 'rename', action: () => rename(r) },
     doc && { label: 'Duplizieren', icon: 'copy', action: () => duplicate([r.id]) },
     { label: 'Verschieben', icon: 'move', action: () => moveItems([r.id]) },
     { label: r.favorite ? 'Aus Favoriten entfernen' : 'Zu Favoriten', icon: r.favorite ? 'starFill' : 'star', action: () => update(r, { favorite: !r.favorite }) },
+    doc && r.offloaded && { label: 'Auf dieses Gerät laden', icon: 'cloudDown', action: () => ensureLocal(r) },
+    doc && !r.offloaded && !r.favorite && signedIn() && { label: 'Nur in Google Drive behalten', icon: 'cloud', action: () => offloadNow(r) },
     nb && { label: 'Cover ändern', icon: 'palette', action: () => changeCover(r) },
     r.kind === 'folder' && { label: 'Farbe & Symbol', icon: 'palette', action: () => changeFolderLook(r) },
     r.conflicts?.length && { label: `Sync-Hinweise (${r.conflicts.length})`, icon: 'sync', action: () => clearConflicts(r) },
-    nb && { label: 'Als PDF exportieren', icon: 'share', action: () => exportPdf(r) },
-    text && { label: 'Als PDF (Drucken)', icon: 'share', action: () => printDoc(r) },
-    doc && { label: 'Als Goodnotes-Datei (Beta)', icon: 'doc', action: async () => (await import('./goodnotes-export.js')).exportGoodnotes(r) },
+    nb && { label: 'Als PDF exportieren', icon: 'share', action: full(d => exportPdf(d)) },
+    text && { label: 'Als PDF (Drucken)', icon: 'share', action: full(d => printDoc(d)) },
+    doc && { label: 'Als Goodnotes-Datei (Beta)', icon: 'doc', action: full(async d => (await import('./goodnotes-export.js')).exportGoodnotes(d)) },
     '-',
     { label: 'In Papierkorb', icon: 'trash', danger: true, action: () => trash([r.id]) },
   ]);
 }
 
 // ---------- Actions ----------
-async function update(r, patch) { Object.assign(r, patch, { updated: Date.now() }); await store.put(r); }
+async function update(r, patch) {
+  Object.assign(r, patch, { updated: Date.now() });
+  await store.put(r);
+  // favourites stay on the device: one that was kept only in Drive is loaded now
+  if (patch.favorite && r.offloaded) ensureLocal(r);
+}
+async function offloadNow(r) {
+  if (await offload(r)) toast(`„${r.name}“ liegt jetzt nur in Google Drive (${fmtBytes(recordSize(r))} frei)`, 3500);
+  else toast('Geht erst, wenn die neueste Fassung mit Google Drive synchronisiert ist.', 4000);
+}
 
 async function rename(r) {
   const name = await promptText('Umbenennen', r.name, '', r.kind === 'notebook' ? suggestNames(r) : []);
@@ -486,6 +504,7 @@ async function rename(r) {
 }
 
 async function duplicate(ids) {
+  for (const r of ids.map(byId)) if (r?.offloaded) { const d = await ensureLocal(r); if (!d) return; records[records.indexOf(r)] = d; }
   const copies = ids.map(byId).filter(r => r?.kind === 'notebook' || r?.kind === 'textdoc').map(r => r.kind === 'textdoc'
     ? { ...structuredClone(r), id: newTextDoc().id, name: r.name + ' Kopie', created: Date.now(), updated: Date.now(), opened: Date.now(), favorite: false }
     : cloneNotebook(r, r.name + ' Kopie'));
@@ -1093,6 +1112,61 @@ export function applyTheme() {
   else document.documentElement.dataset.theme = t;
 }
 
+// "Speicher" in the settings: the browser's estimate for everything Folio stores on this device,
+// plus a breakdown measured from the data itself (records as JSON, the sync bases, the offline
+// copy of the app). Filled in after the sheet opens, measuring can take a moment.
+const fmtBytes = n => (n >= 1e9 ? (n / 1e9).toFixed(1).replace('.', ',') + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(1).replace('.', ',') + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB');
+function storageBox() {
+  const box = h('div', { class: 'group-box storage-box' }, h('div', { class: 'hint' }, 'Wird berechnet …'));
+  (async () => {
+    const row = (label, value, sub) => h('div', { class: 'storage-row' }, h('span', {}, label, sub ? h('span', { class: 'hint' }, ' ' + sub) : null), h('b', {}, value));
+    const size = r => JSON.stringify(r).length;
+    const all = (await store.all()).filter(r => !r.deleted);
+    const docs = all.filter(r => !CAL_KINDS.has(r.kind)), cal = all.filter(r => CAL_KINDS.has(r.kind));
+    const docBytes = docs.reduce((s, r) => s + size(r), 0), calBytes = cal.reduce((s, r) => s + size(r), 0);
+    let baseBytes = 0;
+    try { baseBytes = (await store.allBases()).reduce((s, r) => s + size(r), 0); } catch {}
+    let appBytes = 0;
+    try { for (const k of await caches.keys()) { const c = await caches.open(k); for (const req of await c.keys()) appBytes += (await (await c.match(req)).blob()).size; } } catch {}
+    let est = null;
+    try { est = await navigator.storage?.estimate?.(); } catch {}
+    const biggest = docs.filter(r => r.kind !== 'folder' && !r.offloaded).map(r => [r, size(r)]).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    const stubs = docs.filter(r => r.offloaded);
+    box.replaceChildren(...[
+      stubs.length ? row('Nur in Google Drive', fmtBytes(stubs.reduce((s, r) => s + (r.size || 0), 0)), `(${stubs.length} Dokument${stubs.length === 1 ? '' : 'e'}, hier nicht belegt)`) : null,
+      est?.usage != null ? row('Belegt auf diesem Gerät', fmtBytes(est.usage), est.quota ? `(von max. ${fmtBytes(est.quota)})` : '') : row('Belegt auf diesem Gerät', 'nicht verfügbar'),
+      row('Notizen und Dokumente', fmtBytes(docBytes), `(${docs.filter(r => r.kind !== 'folder').length})`),
+      baseBytes ? row('Sync-Abgleichstand', fmtBytes(baseBytes)) : null,
+      calBytes ? row('Kalender', fmtBytes(calBytes)) : null,
+      appBytes ? row('App (offline)', fmtBytes(appBytes)) : null,
+      biggest.length ? h('div', { class: 'form-label' }, 'Größte Dokumente') : null,
+      ...biggest.map(([r, n]) => row(r.name, fmtBytes(n))),
+      h('div', { class: 'hint' }, 'Der Gesamtwert ist eine Schätzung des Browsers (Safari rundet, manche Browser komprimieren); die Einzelwerte sind die Größe der gespeicherten Daten. Importierte PDFs brauchen am meisten Platz, weil ihre Seiten als Bilder gespeichert werden. Der Sync-Abgleichstand ist die lokale Kopie für das Zusammenführen zwischen Geräten.'),
+    ].filter(Boolean)); // replaceChildren would turn null into the text "null"
+  })();
+  return box;
+}
+
+// "Große Dokumente nur in Google Drive" (offload.js)
+function offloadBox() {
+  const sizeCtl = h('div', { class: 'offload-size', hidden: !offloadOn() },
+    h('div', { class: 'hint' }, 'Ab Größe:'),
+    segmented(OFFLOAD_SIZES.map(n => [n, fmtBytes(n)]), offloadMin(), v => { settings.offloadMin = v; saveSettings(); }));
+  return h('div', { class: 'group-box', style: { marginBottom: '10px' } },
+    toggle('Große Dokumente nur in Google Drive', offloadOn(), v => { settings.offload = v; saveSettings(); sizeCtl.hidden = !v; }),
+    sizeCtl,
+    h('div', { class: 'hint' }, signedIn()
+      ? 'Große Notizbücher und Dokumente (z. B. Literatur-PDFs), die du 3 Tage nicht geöffnet hast, bleiben nur in deinem Google Drive und werden beim Öffnen geladen (braucht Internet). Favoriten bleiben immer auf diesem Gerät. Einzeln steuerbar über ··· → „Nur in Google Drive behalten“ / „Auf dieses Gerät laden“.'
+      : 'Wirkt nur mit Google-Drive-Sync: Große Dokumente bleiben dann nur in Drive, Favoriten immer auf dem Gerät.'),
+    signedIn() && offloadOn() ? h('button', { class: 'pill-btn', onclick: async e => {
+      e.currentTarget.disabled = true;
+      const local = new Map((await store.all()).map(r => [r.id, r]));
+      const n = await runOffload(local, { force: true });
+      toast(n ? `${n} Dokument(e) liegen jetzt nur in Google Drive` : 'Nichts zum Auslagern (zu klein, Favorit, kürzlich geöffnet oder noch nicht synchronisiert)', 4000);
+      e.currentTarget.disabled = false;
+    } }, icon('cloud', 16), 'Jetzt aufräumen') : null);
+}
+
 export async function openSettings() {
   const account = signedIn()
     ? h('div', { class: 'group-box acc-box' },
@@ -1116,6 +1190,9 @@ export async function openSettings() {
     h('div', { class: 'group-box', style: { marginTop: '10px' } },
       toggle('Goodnotes-Kopien in Drive', settings.gnCopies !== false, v => { settings.gnCopies = v; saveSettings(); }),
       h('div', { class: 'hint' }, 'Legt zu jedem Notizbuch eine .goodnotes-Datei im Drive-Ordner der App unter „Goodnotes“ ab (aktualisiert eine Minute nach der letzten Änderung). Öffnen in Goodnotes: Dateien-App → Google Drive.')),
+    h('div', { class: 'form-label' }, 'Speicher'),
+    offloadBox(),
+    storageBox(),
     h('div', { class: 'about' }, folioMark(40), h('div', {}, h('div', { class: 'about-name' }, 'Folio'), h('div', { class: 'hint' }, `Make space for ideas. · Version ${APP_VERSION} · `, h('a', { href: 'datenschutz.html', target: '_blank', rel: 'noopener' }, 'Datenschutz')))));
   const ok = await sheet({ title: 'Einstellungen', body });
   if (ok) renderSidebar();

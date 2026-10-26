@@ -2,7 +2,7 @@ import { uid } from './util.js';
 import { toRadius } from './ink.js';
 
 // Shown in the settings, to check which version a device is running. Raise with each update.
-export const APP_VERSION = '45';
+export const APP_VERSION = '46';
 
 export const PAGE_W = 1000;
 export const FORMATS = { a4: { label: 'A4 Hoch', h: 1414 }, a4l: { label: 'A4 Quer', h: 707 }, letter: { label: 'Letter', h: 1294 } };
@@ -83,6 +83,7 @@ export const store = {
   // sync bases (no change events: they are bookkeeping, not edits)
   async allBases() { return tx('readonly', s => s.getAll(), 'bases'); },
   async putBase(r) { await tx('readwrite', s => s.put(structuredClone(r)), 'bases'); },
+  async deleteBase(id) { await tx('readwrite', s => s.delete(id), 'bases'); },
 };
 
 export const newPage = (template = 'lined', h = 1414, paper) => ({ id: uid(), template, h, elements: [], ...(paper && paper !== 'white' ? { paper } : {}) });

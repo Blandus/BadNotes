@@ -16,6 +16,7 @@ import { store, settings, saveSettings, bus } from './store.js';
 import { menu, popover, closePopover, toast, promptText } from './ui.js';
 import { loadImageFile } from './pdf.js';
 import { renderLibrary } from './library.js';
+import { ensureLocal } from './offload.js';
 
 // Yjs (CRDT library Goodnotes stores text documents with) — only needed for .goodnotes
 // import, loaded on demand (the service worker keeps a copy for offline use).
@@ -251,7 +252,11 @@ export const textLocked = id => td.doc?.id === id && td.dirty;
 const view = () => $('#textdoc');
 
 export async function openTextDoc(id) {
-  const doc = await store.get(id);
+  let doc = await store.get(id);
+  if (doc?.offloaded) { // kept only in Google Drive: load it first
+    doc = await ensureLocal(doc);
+    if (!doc) { settings.openText = null; saveSettings(); if ($('#library').hidden && $('#editor').hidden) { $('#library').hidden = false; renderLibrary(); } return; }
+  }
   if (!doc || doc.deleted || doc.trashed) {
     settings.openText = null; saveSettings();
     if ($('#library').hidden && $('#editor').hidden) { $('#library').hidden = false; renderLibrary(); }
