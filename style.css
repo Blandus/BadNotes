@@ -339,7 +339,9 @@ svg { display: block; flex: none; }
 .hint { font-size: 13px; color: var(--text-2); }
 .hint.pad { padding: 4px 14px 8px; }
 .group-box { background: var(--surface); border-radius: 10px; padding: 4px 12px 10px; border: 1px solid var(--sep); }
-.toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; font-size: 16px; }
+.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; font-size: 16px; }
+.toggle-row > span { min-width: 0; overflow-wrap: anywhere; }
+.toggle-row > .switch { flex: none; }
 .switch {
   appearance: none; -webkit-appearance: none; width: 51px; height: 31px; border-radius: 999px;
   background: var(--surface-3); position: relative; cursor: pointer; transition: background .2s; margin: 0;
@@ -1142,3 +1144,21 @@ button.sz-row:hover { background: var(--surface-3); }
   /* One shared horizontal scroll position keeps weekday headings and time columns aligned. */
   .cal-grid > .cal-scroll { min-width: 500px; overflow-x: hidden; }
 }
+
+/* Tiles: just the object (folder, notebook cover, page, text document), no card frame around it */
+.tile, .tile:hover { background: transparent; border-color: transparent; box-shadow: none; }
+.tile.selected { border-color: var(--mist); box-shadow: 0 0 0 2px var(--accent-soft); }
+.tile .thumb { background: transparent; border-bottom: 0; padding: 6px 6px 0; align-items: center; }
+.tile .thumb canvas.paper { border-radius: 4px; box-shadow: 0 0 0 1px var(--sep), 0 2px 8px rgba(15, 39, 71, .10); }
+.tile .thumb canvas.cover { border-radius: 3px 8px 8px 3px; box-shadow: 0 2px 8px rgba(15, 39, 71, .18); }
+.tile.is-folder .thumb { padding: 0; }
+.tile.is-folder .folder-art { transform: scale(1.55); }
+/* list rows: a little taller, folders easier to see */
+.row-hit { padding: 12px 14px; gap: 16px; }
+.row-thumb { width: 52px; height: 60px; }
+.row-thumb .folder-art { transform: scale(.5); }
+.row-title { font-size: 15px; }
+.row-sub { font-size: 12.5px; margin-top: 2px; }
+.paste-status { display: flex; flex-direction: column; gap: 6px; font-size: 13px; line-height: 1.45; color: var(--text-2); overflow-wrap: anywhere; }
+.paste-status:empty { display: none; }
+.paste-status b { color: var(--text); }
