@@ -596,7 +596,7 @@ svg { display: block; flex: none; }
 }
 .suggest-chip:hover { border-color: var(--accent); color: var(--accent); }
 
-/* Paste field for PDFs */
+/* Explicit paste field for PDF and Goodnotes documents */
 .paste-zone {
   min-height: 150px; border: 2px dashed var(--sep-strong); border-radius: 14px; background: var(--surface);
   display: flex; align-items: center; justify-content: center; text-align: center; padding: 16px;
@@ -1162,3 +1162,24 @@ button.sz-row:hover { background: var(--surface-3); }
 .paste-status { display: flex; flex-direction: column; gap: 6px; font-size: 13px; line-height: 1.45; color: var(--text-2); overflow-wrap: anywhere; }
 .paste-status:empty { display: none; }
 .paste-status b { color: var(--text); }
+
+/* Free library space is a native paste target; actual cards remain independent controls. */
+.lib-content.library-paste-enabled { position: relative; isolation: isolate; }
+.library-paste-space {
+  position: absolute; inset: 0; z-index: 0; outline: none; caret-color: transparent;
+  -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
+}
+.library-paste-enabled > .lib-grid, .library-paste-enabled > .lib-list, .library-paste-enabled > .empty {
+  position: relative; z-index: 1; pointer-events: none;
+}
+.library-paste-enabled .tile, .library-paste-enabled .row { pointer-events: auto; }
+.paste-zone { -webkit-touch-callout: default; }
+.paste-file-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.paste-file-actions .pill-btn { min-height: 44px; height: auto; white-space: normal; text-align: left; }
+.paste-help { font-size: 13px; line-height: 1.5; color: var(--text-2); }
+.paste-help summary { cursor: pointer; padding: 8px 0; color: var(--text); }
+.paste-help p { margin: 8px 0; }
+
+.clipboard-sheet .sheet-head { grid-template-columns: auto minmax(0, 1fr); }
+.clipboard-sheet .sheet-title { text-align: center; overflow-wrap: anywhere; }
+.clipboard-sheet .sheet-head > :last-child { display: none; }
