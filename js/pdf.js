@@ -1,5 +1,5 @@
 import { PAGE_W } from './store.js';
-import { renderPage, pageH } from './render.js';
+import { renderPage, pageH, pageX0, pageY0, unionBox } from './render.js';
 import { uid, readAsDataURL } from './util.js';
 import { toast } from './ui.js';
 import { pdfFileToPages } from './pdfdoc.js';
@@ -45,6 +45,22 @@ export async function loadImageFile(file, max = 1600) {
 
 const safeName = n => (n || 'Folio').replace(/[\\/:*?"<>|]/g, '_');
 
+// Area to export: the whole page; for an infinite page its content plus a margin.
+function exportArea(page) {
+  if (!page.inf) return { x: 0, y: 0, w: PAGE_W, h: pageH(page) };
+  if (!page.elements.length) return { x: pageX0(page), y: pageY0(page), w: PAGE_W, h: 1414 };
+  const b = unionBox(page.elements), m = 40;
+  return { x: b.x - m, y: b.y - m, w: b.w + 2 * m, h: b.h + 2 * m };
+}
+// Renders an area of a page into a new canvas (scale s, capped so the canvas stays within browser limits).
+async function renderArea(page, a, s) {
+  s = Math.min(s, Math.sqrt(1.6e7 / (a.w * a.h)), 16000 / Math.max(a.w, a.h));
+  const c = document.createElement('canvas');
+  c.width = Math.round(a.w * s); c.height = Math.round(a.h * s);
+  await renderPage(c.getContext('2d'), page, s, null, -(a.x - pageX0(page)) * s, -(a.y - pageY0(page)) * s);
+  return c;
+}
+
 export const MAX_EXPORT_PAGES = 500;
 export async function exportPdf(doc, pages = doc.pages) {
   const { jsPDF } = window.jspdf || {};
@@ -56,11 +72,10 @@ export async function exportPdf(doc, pages = doc.pages) {
   let pdf;
   for (const [i, page] of pages.entries()) {
     toast(`PDF wird erstellt: Seite ${i + 1} von ${pages.length}`, 0);
-    const h = pageH(page);
-    const c = document.createElement('canvas');
-    c.width = PAGE_W * s; c.height = Math.round(h * s);
-    await renderPage(c.getContext('2d'), page, s);
-    const fmt = [PAGE_W * 0.595, h * 0.595]; // A4 width = 595 pt
+    const a = exportArea(page);
+    const c = await renderArea(page, a, s);
+    const pt = Math.min(0.595, 14400 / Math.max(a.w, a.h)); // A4 width = 595 pt; PDF pages are at most 14400 pt
+    const fmt = [a.w * pt, a.h * pt];
     const orient = fmt[0] > fmt[1] ? 'l' : 'p';
     if (!pdf) pdf = new jsPDF({ unit: 'pt', format: fmt, orientation: orient });
     else pdf.addPage(fmt, orient);
@@ -72,9 +87,7 @@ export async function exportPdf(doc, pages = doc.pages) {
 }
 
 export async function exportPng(doc, page, index) {
-  const c = document.createElement('canvas'), s = 2;
-  c.width = PAGE_W * s; c.height = Math.round(pageH(page) * s);
-  await renderPage(c.getContext('2d'), page, s);
+  const c = await renderArea(page, exportArea(page), 2);
   const a = document.createElement('a');
   a.href = c.toDataURL('image/png');
   a.download = `${safeName(doc.name)} – Seite ${index + 1}.png`;

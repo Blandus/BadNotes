@@ -5,6 +5,27 @@ import { layout, drawRich, LINE_H } from './richtext.js';
 import { drawPdfPage } from './pdfdoc.js';
 
 export const pageH = p => p.h || 1414;
+// Infinite pages (page.inf) have their own width and an origin: their area is x0..x0+w × y0..y0+h
+// in element coordinates and grows in every direction with the content (fitInfinite).
+export const pageW = p => (p.inf && p.w) || PAGE_W;
+export const pageX0 = p => (p.inf && p.x0) || 0;
+export const pageY0 = p => (p.inf && p.y0) || 0;
+const INF_MARGIN = 500;
+// Grows an infinite page so its content keeps INF_MARGIN free space on every side.
+// Returns { dx, dy } (how far the origin moved left / up) or null when nothing changed.
+export function fitInfinite(page) {
+  if (!page.inf || !page.elements.length) return null;
+  const b = unionBox(page.elements);
+  let x0 = pageX0(page), y0 = pageY0(page), x1 = x0 + pageW(page), y1 = y0 + pageH(page);
+  const step = v => Math.ceil(v / 250) * 250; // grow in steps, not on every stroke
+  const nx0 = b.x - INF_MARGIN < x0 ? x0 - step(x0 - b.x + INF_MARGIN) : x0;
+  const ny0 = b.y - INF_MARGIN < y0 ? y0 - step(y0 - b.y + INF_MARGIN) : y0;
+  const nx1 = b.x + b.w + INF_MARGIN > x1 ? x1 + step(b.x + b.w + INF_MARGIN - x1) : x1;
+  const ny1 = b.y + b.h + INF_MARGIN > y1 ? y1 + step(b.y + b.h + INF_MARGIN - y1) : y1;
+  if (nx0 === x0 && ny0 === y0 && nx1 === x1 && ny1 === y1) return null;
+  Object.assign(page, { x0: nx0, y0: ny0, w: nx1 - nx0, h: ny1 - ny0 });
+  return { dx: x0 - nx0, dy: y0 - ny0 };
+}
 export const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif';
 const measure = document.createElement('canvas').getContext('2d');
 
@@ -83,6 +104,27 @@ export function drawTemplate(ctx, t, h, dark = false) {
   ctx.restore();
 }
 
+// Infinite pages: lines, grid or dots continue across the whole area (no margins or headers).
+function drawInfiniteTemplate(ctx, page) {
+  const t = page.template, dark = page.paper === 'dark';
+  if (!t || t === 'blank') return;
+  const x0 = pageX0(page), y0 = pageY0(page), x1 = x0 + pageW(page), y1 = y0 + pageH(page);
+  const g = t === 'dots' || t === 'grid' ? 25 : t === 'narrow' ? 30 : 40;
+  const from = v => Math.ceil(v / g) * g;
+  ctx.save();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = dark ? 'rgba(255,255,255,.16)' : '#C9D4E4';
+  ctx.fillStyle = dark ? 'rgba(255,255,255,.3)' : '#A7B2C3';
+  if (t === 'dots') { for (let x = from(x0); x < x1; x += g) for (let y = from(y0); y < y1; y += g) ctx.fillRect(x - 1.4, y - 1.4, 2.8, 2.8); }
+  else {
+    ctx.beginPath();
+    for (let y = from(y0); y < y1; y += g) { ctx.moveTo(x0, y); ctx.lineTo(x1, y); }
+    if (t === 'grid') for (let x = from(x0); x < x1; x += g) { ctx.moveTo(x, y0); ctx.lineTo(x, y1); }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 export const paperColor = page => PAPERS[page.paper]?.color || '#FFFFFF';
 
 // ---------- Strokes ----------
@@ -123,12 +165,13 @@ const drawText = (ctx, t) => drawRich(ctx, t, measure);
 // ---------- Pages ----------
 // ox/oy shift the output (in canvas pixels) so a cut-out of the page can be rendered.
 export async function renderPage(ctx, page, scale, hideId, ox = 0, oy = 0) {
+  if (page.inf) { ox -= pageX0(page) * scale; oy -= pageY0(page) * scale; }
   const srcs = [page.bg, ...page.elements.filter(e => e.type === 'image').map(e => e.src)].filter(Boolean);
   const imgs = new Map(await Promise.all(srcs.map(async s => [s, await loadImage(s)])));
   const h = pageH(page);
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
   ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
-  ctx.fillStyle = paperColor(page); ctx.fillRect(0, 0, PAGE_W, h);
+  ctx.fillStyle = paperColor(page); ctx.fillRect(pageX0(page), pageY0(page), pageW(page), h);
   if (page.bg && imgs.get(page.bg)) ctx.drawImage(imgs.get(page.bg), 0, 0, PAGE_W, h);
   if (page.pdf && !(await drawPdfPage(ctx, page, scale, ox, oy))) {
     // the original PDF is not on this device and can't be loaded right now
@@ -141,7 +184,8 @@ export async function renderPage(ctx, page, scale, hideId, ox = 0, oy = 0) {
     ctx.textAlign = 'start';
   }
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
-  drawTemplate(ctx, page.template, h, page.paper === 'dark');
+  if (page.inf) drawInfiniteTemplate(ctx, page);
+  else drawTemplate(ctx, page.template, h, page.paper === 'dark');
   for (const e of page.elements) {
     if (e.id === hideId) continue;
     if (e.type === 'stroke') drawStroke(ctx, e);
@@ -151,8 +195,21 @@ export async function renderPage(ctx, page, scale, hideId, ox = 0, oy = 0) {
 }
 
 export async function renderThumb(canvas, page, width) {
-  canvas.width = width; canvas.height = Math.round(width * pageH(page) / PAGE_W);
-  await renderPage(canvas.getContext('2d'), page, width / PAGE_W);
+  if (page.inf) return renderInfiniteThumb(canvas, page, width);
+  canvas.width = width; canvas.height = Math.round(width * pageH(page) / pageW(page));
+  await renderPage(canvas.getContext('2d'), page, width / pageW(page));
+}
+
+// Infinite page preview: its content (or the start of the area), fitted into an A4 portrait card.
+async function renderInfiniteThumb(canvas, page, width) {
+  canvas.width = width; canvas.height = Math.round(width * 1.414);
+  const b = page.elements.length ? unionBox(page.elements) : { x: pageX0(page), y: pageY0(page), w: PAGE_W, h: 1414 };
+  const m = 40, w = b.w + 2 * m, h = b.h + 2 * m;
+  const s = Math.min(canvas.width / w, canvas.height / h);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = paperColor(page); ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const ox = (canvas.width - w * s) / 2 - (b.x - m - pageX0(page)) * s, oy = (canvas.height - h * s) / 2 - (b.y - m - pageY0(page)) * s;
+  await renderPage(ctx, page, s, null, ox, oy);
 }
 
 // Notebook cover: solid colour, darker spine, label plate.

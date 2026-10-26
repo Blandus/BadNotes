@@ -109,9 +109,19 @@ const leafMerge = (ctx, what, newId) => (B, L, R) => {
   return { item: R, dup };
 };
 
+// Infinite pages grow on both devices: the merged area covers both (no note).
+const INF_AREA = ['x0', 'y0', 'w', 'h'];
+function unionArea(L, R) {
+  const box = p => [p.x0 || 0, p.y0 || 0, (p.x0 || 0) + (p.w || 0), (p.y0 || 0) + (p.h || 0)];
+  const [a, b] = [box(L), box(R)];
+  const x0 = Math.min(a[0], b[0]), y0 = Math.min(a[1], b[1]);
+  return { x0, y0, w: Math.max(a[2], b[2]) - x0, h: Math.max(a[3], b[3]) - y0 };
+}
+
 const mergePage = ctx => (B, L, R) => ({
   item: {
-    ...mergeFields(B, L, R, ctx, new Set(['id', 'elements']), { template: 'Seitenvorlage', paper: 'Papier', bg: 'Seitenhintergrund', h: 'Seitenformat', bookmark: 'Lesezeichen' }),
+    ...mergeFields(B, L, R, ctx, new Set(['id', 'elements', ...(L.inf && R.inf ? INF_AREA : [])]), { template: 'Seitenvorlage', paper: 'Papier', bg: 'Seitenhintergrund', h: 'Seitenformat', bookmark: 'Lesezeichen' }),
+    ...(L.inf && R.inf ? unionArea(L, R) : {}),
     id: L.id,
     elements: mergeList(B?.elements, L.elements, R.elements, ctx, 'Ein Element', leafMerge(ctx, 'Ein Element', uid)),
   },

@@ -160,7 +160,7 @@ function go(section, folder = null) {
 // Folder dots cycle through the brand's quiet colours
 // Folder look: colour from the Folio palette (or any custom colour) and an optional symbol.
 // Folders without a colour keep the default sage (theme variable, so dark mode still fits).
-const FOLDER_ICONS = ['book', 'school', 'work', 'idea', 'flask', 'music', 'heart', 'code', 'calendar', 'home', 'star', 'camera', 'palette', 'doc'];
+const FOLDER_ICONS = ['book', 'school', 'work', 'idea', 'flask', 'music', 'heart', 'code', 'calendar', 'home', 'star', 'camera', 'palette', 'doc', 'pencil', 'globe', 'plane', 'sport', 'leaf', 'money', 'chart', 'person', 'people', 'food', 'health', 'car', 'game', 'flag', 'lock', 'archive', 'sun', 'coffee'];
 const folderColor = f => (/^#[0-9a-f]{6}$/i.test(f?.color || '') ? f.color : 'var(--sage)');
 const folderIcon = f => (FOLDER_ICONS.includes(f?.icon) ? f.icon : null);
 // dark ink on light folder colours, white on dark ones
@@ -722,10 +722,13 @@ function newNotebookSheet() {
   };
   const collapsed = new Set();
   const pageHeight = () => {
-    const base = FORMATS[o.format].h;
+    const base = (FORMATS[o.format] || FORMATS.a4).h;
     return o.orient === 'landscape' ? Math.round(PAGE_W * PAGE_W / base) : base;
   };
-  const samplePage = template => ({ template, h: pageHeight(), paper: o.paper, elements: [] });
+  // "Unendlich": one page that grows with its content in every direction (see fitInfinite in render.js)
+  const INF = 2000;
+  const samplePage = template => (o.format === 'inf' ? { template, inf: true, w: INF, h: INF, paper: o.paper, elements: [] } : { template, h: pageHeight(), paper: o.paper, elements: [] });
+  const firstPage = () => (o.format === 'inf' ? { ...newPage(o.template, INF, o.paper), inf: true, w: INF, x0: 0, y0: 0 } : newPage(o.template, pageHeight(), o.paper));
 
   const back = h('div', { class: 'backdrop' });
   const close = () => { document.removeEventListener('keydown', onKey); back.classList.add('closing'); setTimeout(() => back.remove(), 200); };
@@ -734,7 +737,7 @@ function newNotebookSheet() {
     const nb = newNotebook({
       name: o.name.trim() || 'Unbenanntes Notizbuch', cover: o.cover,
       parent: lib.section === 'docs' ? lib.folder : null,
-      pages: [newPage(o.template, pageHeight(), o.paper)],
+      pages: [firstPage()],
     });
     close();
     await store.put(nb);
@@ -774,12 +777,12 @@ function newNotebookSheet() {
     }
     const set = (k, v) => () => { o[k] = v; render(); };
     filters.replaceChildren(
-      dropdown(FORMATS[o.format].label.replace(' Hoch', ''), [['a4', 'A4'], ['letter', 'Letter']].map(([k, l]) => ({ label: l, checked: o.format === k, action: set('format', k) }))),
+      dropdown(o.format === 'inf' ? 'Unendlich' : FORMATS[o.format].label.replace(' Hoch', ''), [['a4', 'A4'], ['letter', 'Letter'], ['inf', 'Unendlich']].map(([k, l]) => ({ label: l, checked: o.format === k, action: set('format', k) }))),
       dropdown(PAPERS[o.paper].label, Object.entries(PAPERS).map(([k, p]) => ({ label: p.label, swatch: p.color, action: set('paper', k) }))),
       h('div', { class: 'spacer' }),
-      h('div', { class: 'nb-orient', role: 'group', 'aria-label': 'Ausrichtung' },
+      ...(o.format === 'inf' ? [] : [h('div', { class: 'nb-orient', role: 'group', 'aria-label': 'Ausrichtung' },
         h('button', { class: o.orient === 'portrait' ? 'active' : '', title: 'Hochformat', onclick: set('orient', 'portrait') }, icon('portrait', 20)),
-        h('button', { class: o.orient === 'landscape' ? 'active' : '', title: 'Querformat', onclick: set('orient', 'landscape') }, icon('landscape', 20))));
+        h('button', { class: o.orient === 'landscape' ? 'active' : '', title: 'Querformat', onclick: set('orient', 'landscape') }, icon('landscape', 20)))]));
   }
 
   function section(name, tiles) {
@@ -795,7 +798,7 @@ function newNotebookSheet() {
   function renderGallery() {
     const top = gallery.scrollTop;
     if (o.panel === 'paper') {
-      gallery.replaceChildren(...TEMPLATE_SECTIONS.map(([name, keys]) => section(name, keys.map(k => {
+      gallery.replaceChildren(...(o.format === 'inf' ? [[TEMPLATE_SECTIONS[0][0], ['blank', 'dots', 'narrow', 'lined', 'grid']]] : TEMPLATE_SECTIONS).map(([name, keys]) => section(name, keys.map(k => {
         const cv = h('canvas'); renderThumb(cv, samplePage(k), 200);
         return tileBtn(o.template === k, cv, TEMPLATES[k], () => { o.template = k; renderLeft(); renderGallery(); });
       }))));

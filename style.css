@@ -461,7 +461,7 @@ svg { display: block; flex: none; }
 }
 /* without tabs (or in a text document) the header itself starts below the status bar */.tabbar[hidden] + .toolbar, .textdoc-view > .toolbar { height: calc(52px + env(safe-area-inset-top)); padding-top: env(safe-area-inset-top); }
 .tb-group { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
-.tb-group.right { justify-content: flex-end; flex: none; }
+.tb-group.right { justify-content: flex-end; }
 .tb-group-inner, .undo-group { display: flex; align-items: center; gap: 2px; }
 .tb-divider { width: 1px; height: 22px; background: var(--sep); margin: 0 8px; }
 .barbtn {
@@ -482,12 +482,8 @@ svg { display: block; flex: none; }
 .doc-title svg { color: var(--text-2); }
 .doc-title:hover { background: var(--surface-3); }
 
-/* Tool row: groups of tools, then the active tool's settings */
-.toolrow {
-  display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; flex: none;
-  padding: 8px 12px; background: var(--ed-bar); border-bottom: 1px solid var(--sep); position: relative; z-index: 4;
-}
-.tb-tools { display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 14px; background: var(--surface-2); border: 1px solid var(--sep); }
+/* the tools sit in the middle of the header */
+.tb-tools { display: flex; align-items: center; gap: 2px; flex: none; }
 .tool-sep { width: 1px; height: 22px; background: var(--sep-strong); margin: 0 5px; flex: none; }
 .toolbtn { width: 40px; height: 38px; display: inline-flex; align-items: center; justify-content: center; flex: none; color: var(--text); }
 .toolbtn > span {
@@ -508,6 +504,9 @@ svg { display: block; flex: none; }
 .undo-group button { width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border-radius: 10px; color: var(--text); transition: background var(--dur) ease; }
 .undo-group button:hover:not(:disabled) { background: var(--surface-3); }
 .undo-group button:disabled { opacity: .3; }
+/* undo / redo: top left over the page */
+.undo-pill { left: calc(12px + env(safe-area-inset-left)); top: 10px; height: 44px; border-radius: 14px; padding: 0 3px; gap: 2px; }
+.undo-pill button { width: 40px; height: 38px; }
 .page-pill { left: 18px; bottom: 22px; height: 32px; border-radius: 999px; padding: 0 12px; font-size: 12.5px; font-weight: 500; font-variant-numeric: tabular-nums; pointer-events: none; }
 .zoom-pill { right: 18px; bottom: 22px; height: 36px; border-radius: 999px; padding: 0 3px; font-size: 12.5px; font-weight: 500; }
 .zoom-pill button { height: 30px; min-width: 30px; padding: 0 6px; border-radius: 999px; display: flex; align-items: center; justify-content: center; }
@@ -749,12 +748,10 @@ svg { display: block; flex: none; }
 @media (max-width: 1100px) {
   .doc-title { max-width: 260px; margin-right: 4px; }
   .tb-tools { padding: 0 4px; }
-  .toolrow { gap: 6px; }
 }
 @media (max-width: 900px) {
   #btnBookmark, #btnShare { display: none; }
   .toolbtn { width: 36px; }
-  .toolrow { padding: 6px 8px; }
   #pages { padding-top: 20px; }
 }
 @media (max-width: 700px) {
@@ -804,9 +801,9 @@ svg { display: block; flex: none; }
   .toolbar { gap: 2px; padding-left: 4px; padding-right: 4px; overflow-x: auto; scrollbar-width: none; }
   .toolbar::-webkit-scrollbar { display: none; }
   .toolbar .tb-group { flex: none; }
-  .toolbar .tb-group, .toolbar .tb-group-inner, .toolbar .undo-group { gap: 0; }
+  .toolbar .tb-group, .toolbar .tb-group-inner { gap: 0; }
   .toolbar .tb-divider { display: none; }
-  .toolbar .barbtn, .toolbar .undo-group button { width: 38px; height: 44px; }
+  .toolbar .barbtn { width: 38px; height: 44px; }
   .toolbar #btnShare { display: flex; }
   .backdrop { padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); }
   .sheet { max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 16px); }
@@ -1007,9 +1004,6 @@ button.sz-row:hover { background: var(--surface-3); }
 .acc-text .hint { overflow: hidden; text-overflow: ellipsis; }
 .about a { color: var(--accent); }
 /* Main tool row: one line, never wraps; on narrow screens it scrolls sideways instead */
-.toolrow { flex-wrap: nowrap !important; justify-content: flex-start !important; overflow-x: auto; scrollbar-width: none; }
-.toolrow::-webkit-scrollbar { display: none; }
-.toolrow > .tb-tools { margin: 0 auto; flex: none; }
 
 /* Tool details bar (#optdock): floats over the canvas, docked top / left / right */
 .optdock {

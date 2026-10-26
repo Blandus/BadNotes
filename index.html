@@ -31,15 +31,11 @@
 
 <section id="editor" class="view" hidden>
   <div class="tabbar" id="tabbar" hidden><div id="tabs" class="tabs"></div></div>
-  <!-- header: navigation and document actions -->
+  <!-- header: navigation, the tools (drawing · content · presentation), document actions -->
   <div class="toolbar">
     <div class="tb-group" id="tbLeft"></div>
-    <div class="tb-group right"><div id="undoPill" class="undo-group"></div><div class="tb-divider"></div><div class="tb-group-inner" id="tbRight"></div></div>
-  </div>
-  <!-- tool row: drawing · content · presentation tools, then the active tool's settings -->
-  <!-- main tool bar: only the tools, never changes size when switching tools -->
-  <div class="toolrow">
     <div class="tb-tools" id="tbTools"></div>
+    <div class="tb-group right"><div class="tb-group-inner" id="tbRight"></div></div>
   </div>
   <div class="ed-body">
     <aside id="thumbs" class="thumbs" hidden></aside>
@@ -52,6 +48,7 @@
         <div class="optdock-grip" title="Leiste verschieben – an den Rand ziehen zum Andocken" aria-label="Leiste verschieben"></div>
         <div id="optbar" class="opt-pill"></div>
       </div>
+      <div id="undoPill" class="float-pill undo-pill undo-group"></div>
       <div id="pageInd" class="float-pill page-pill"></div>
       <div id="zoomPill" class="float-pill zoom-pill"></div>
     </div>

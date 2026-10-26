@@ -1,7 +1,8 @@
+import { PenInput } from './handwriting.js';
 import { $, h, uid, clamp, debounce, pickFile, onContext } from './util.js';
 import { icon } from './icons.js';
 import { store, settings, saveSettings, bus, PAGE_W, newPage, TEMPLATES } from './store.js';
-import { renderPage, renderThumb, pageH, drawStroke, FONTS, fontFamily } from './render.js';
+import { renderPage, renderThumb, pageH, pageW, pageX0, pageY0, fitInfinite, drawStroke, FONTS, fontFamily } from './render.js';
 import { menu, popover, sheet, toast, segmented, closePopover, promptText, toggle } from './ui.js';
 import { exportPdf, exportPng, loadImageFile } from './pdf.js';
 import { suggestNames } from './suggest.js';
@@ -218,7 +219,8 @@ let saveT = null;
 export function changed() {
   ed.doc.updated = Date.now();
   clearTimeout(saveT);
-  saveT = setTimeout(flushSave, 600);
+  // Saving clones the document on the main thread: never while a stroke is being drawn.
+  saveT = setTimeout(function later() { if (ed.busy) saveT = setTimeout(later, 300); else flushSave(); }, 600);
 }
 export async function flushSave() {
   if (saveT === null) return;
@@ -238,8 +240,14 @@ export function commit(page, next) {
   if (next === page.elements) return;
   hist().undo.push({ pageId: page.id, before: page.elements, after: next });
   hist().redo = [];
+  const prev = page.elements;
   page.elements = next;
-  const done = refreshPage(page);
+  const grown = growInfinite(page);
+  // Strokes added on top (the usual case while writing) are painted onto the page's existing
+  // canvases instead of re-rendering the whole page: same pixels, a fraction of the work, and
+  // the main thread is free again for the next pen-down right away.
+  const added = !grown && next.length > prev.length && prev.every((e, i) => next[i] === e) ? next.slice(prev.length) : null;
+  const done = refreshPage(page, added);
   changed(); updateChrome();
   return done;
 }
@@ -281,8 +289,8 @@ export async function renderEl(el) {
   visible.add(el);
   const c = el._canvas, page = el._page, ph = pageH(page);
   const dpr = Math.min(window.devicePixelRatio || 1, 3);
-  const scale = Math.min(el.clientWidth * dpr / PAGE_W, Math.sqrt(MAX_CANVAS_PX / (PAGE_W * ph)));
-  const w = Math.round(PAGE_W * scale), hh = Math.round(ph * scale);
+  const pw = pageW(page), scale = Math.min(el.clientWidth * dpr / pw, Math.sqrt(MAX_CANVAS_PX / (pw * ph)));
+  const w = Math.round(pw * scale), hh = Math.round(ph * scale);
   // Draw offscreen, then swap in one go to avoid flicker.
   const off = document.createElement('canvas'); off.width = w; off.height = hh;
   await renderPage(off.getContext('2d'), page, scale, ed.editing?.page === page ? ed.editing.id : null);
@@ -292,7 +300,31 @@ export async function renderEl(el) {
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'copy';
   ctx.drawImage(off, 0, 0);
   ctx.globalCompositeOperation = 'source-over';
+  c._xf = { scale, ox: 0, oy: 0, box: pageBox(page) };
   await renderDetail(el);
+}
+const pageBox = page => [pageX0(page), pageY0(page), pageW(page), pageH(page)].join();
+
+// Paints strokes that were appended to a page onto its page canvas and sharp detail layer, with
+// the transform each was rendered with (renderPage draws elements in order, so drawing the new
+// ones last gives the same pixels as a full render). A render still in flight reads the page's
+// elements only when it draws them, so it includes the new strokes too. Returns false when the
+// canvases can't be reused (not rendered yet, resized, zoomed) — then the page is re-rendered.
+function paintAppended(el, added) {
+  const page = el._page, c = el._canvas, box = pageBox(page);
+  if (!added.every(e => e.type === 'stroke') || !c._xf || c._xf.box !== box || !c.width) return false;
+  const dpr = Math.min(window.devicePixelRatio || 1, 3), pw = pageW(page);
+  if (Math.abs(Math.min(el.clientWidth * dpr / pw, Math.sqrt(MAX_CANVAS_PX / (pw * pageH(page)))) - c._xf.scale) > 1e-6) return false;
+  const paint = (cv, { scale: k, ox, oy }) => {
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(k, 0, 0, k, ox - pageX0(page) * k, oy - pageY0(page) * k);
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+    for (const e of added) drawStroke(ctx, e);
+  };
+  paint(c, c._xf);
+  const det = el._detail;
+  if (det && !det.hidden && det._xf?.token === el._detailToken && det._xf.box === box) paint(det, det._xf);
+  return true;
 }
 
 // ---------- Sharp detail layer ----------
@@ -308,13 +340,14 @@ async function renderDetail(el) {
   const r = el.getBoundingClientRect(), s = sc.getBoundingClientRect();
   const x0 = Math.max(r.left, s.left), y0 = Math.max(r.top, s.top), x1 = Math.min(r.right, s.right), y1 = Math.min(r.bottom, s.bottom);
   if (x1 <= x0 || y1 <= y0 || !r.width) { det.hidden = true; return; }
-  const dpr = window.devicePixelRatio || 1, k = r.width / PAGE_W * dpr;
+  const dpr = window.devicePixelRatio || 1, k = r.width / pageW(el._page) * dpr;
   const off = document.createElement('canvas');
   off.width = Math.round((x1 - x0) * dpr); off.height = Math.round((y1 - y0) * dpr);
   await renderPage(off.getContext('2d'), el._page, k, hideIdFor(el._page), -(x0 - r.left) * dpr, -(y0 - r.top) * dpr);
   if (token !== el._detailToken) return; // superseded, or scrolled/zoomed meanwhile
   det.width = off.width; det.height = off.height;
   det.getContext('2d').drawImage(off, 0, 0);
+  det._xf = { scale: k, ox: -(x0 - r.left) * dpr, oy: -(y0 - r.top) * dpr, token, box: pageBox(el._page) };
   Object.assign(det.style, { left: x0 - r.left + 'px', top: y0 - r.top + 'px', width: x1 - x0 + 'px', height: y1 - y0 + 'px' });
   det.hidden = false;
 }
@@ -326,9 +359,9 @@ function hideDetails() {
   detailT = setTimeout(() => visible.forEach(renderDetail), 140);
 }
 export const elForPage = page => ed.pageEls.find(el => el._page === page);
-export function refreshPage(page) {
+export function refreshPage(page, added = null) {
   const el = elForPage(page);
-  const done = el && visible.has(el) ? renderEl(el) : Promise.resolve();
+  const done = el && visible.has(el) ? (added && paintAppended(el, added) ? Promise.resolve() : renderEl(el)) : Promise.resolve();
   scheduleThumb(page);
   if (ed.sel?.page === page) renderSelection();
   return done;
@@ -341,7 +374,7 @@ function applyZoom() { $('#pages').style.setProperty('--pw', Math.round(baseWidt
 let zoomT;
 const updateZoomLabel = () => { $('#zoomLabel').textContent = Math.round(ed.zoom * 100) + ' %'; };
 export function setZoom(z, cx, cy) {
-  z = clamp(z, 0.5, 4);
+  z = clamp(z, ed.doc?.pages.some(p => p.inf) ? 0.2 : 0.5, 4); // infinite pages can be zoomed out further
   if (Math.abs(z - ed.zoom) < 0.001) return;
   const r = sc.getBoundingClientRect();
   cx ??= r.left + r.width / 2; cy ??= r.top + r.height / 2;
@@ -356,11 +389,30 @@ export function setZoom(z, cx, cy) {
   repositionText();
 }
 
+// Page box: aspect ratio, and for infinite pages a width relative to the normal page width (--pw)
+function sizePageEl(el, page) {
+  el.style.aspectRatio = `${pageW(page)} / ${pageH(page)}`;
+  el.style.width = page.inf ? `calc(var(--pw) * ${pageW(page) / PAGE_W})` : '';
+}
+// Infinite page: grow it with its content; the view stays where it was (the page may grow left/up).
+function growInfinite(page) {
+  const el = elForPage(page);
+  const before = el?.getBoundingClientRect(), k = el ? el.clientWidth / pageW(page) : 0;
+  const moved = fitInfinite(page);
+  if (!moved || !el) return !!moved;
+  sizePageEl(el, page);
+  const after = el.getBoundingClientRect();
+  sc.scrollLeft += after.left + moved.dx * k - before.left;
+  sc.scrollTop += after.top + moved.dy * k - before.top;
+  return true;
+}
+
 export function buildPages() {
   observer.disconnect(); visible.clear();
   applyZoom();
   ed.pageEls = ed.doc.pages.map(page => {
-    const el = h('div', { class: 'page', style: { aspectRatio: `${PAGE_W} / ${pageH(page)}` } });
+    const el = h('div', { class: 'page' });
+    sizePageEl(el, page);
     const c = h('canvas'), det = h('canvas', { class: 'page-detail', hidden: true });
     el.append(c, det);
     if (page.bookmark) el.append(h('div', { class: 'page-bm' }, icon('bookmarkFill', 20)));
@@ -461,7 +513,12 @@ export async function insertImage() {
   // Place in the middle of the visible part of the page.
   const r = el.getBoundingClientRect(), s = sc.getBoundingClientRect();
   const midY = ((Math.max(r.top, s.top) + Math.min(r.bottom, s.bottom)) / 2 - r.top) / r.height * ph;
-  const e = { id: uid(), type: 'image', src: img.src, x: (PAGE_W - w) / 2, y: clamp(midY - hh / 2, 0, Math.max(0, ph - hh)), w, h: hh };
+  let x = (PAGE_W - w) / 2, y = clamp(midY - hh / 2, 0, Math.max(0, ph - hh));
+  if (page.inf) { // infinite page: the middle of the visible area
+    const midX = ((Math.max(r.left, s.left) + Math.min(r.right, s.right)) / 2 - r.left) / r.width * pageW(page);
+    x = pageX0(page) + midX - w / 2; y = pageY0(page) + midY - hh / 2;
+  }
+  const e = { id: uid(), type: 'image', src: img.src, x, y, w, h: hh };
   commit(page, [...page.elements, e]);
   selectTool('lasso');
   selectIds(page, [e.id]);
@@ -484,7 +541,7 @@ export function renderThumbs() {
   if (!settings.thumbsOpen || !ed.doc) return;
   thumbObserver.disconnect();
   const items = ed.doc.pages.map((p, i) => [p, i]).filter(([p]) => thumbFilter === 'all' || p.bookmark).map(([p, i]) => {
-    const c = h('canvas', { 'data-pid': p.id, style: { aspectRatio: `${PAGE_W} / ${pageH(p)}` } });
+    const c = h('canvas', { 'data-pid': p.id, style: { aspectRatio: p.inf ? `${PAGE_W} / 1414` : `${PAGE_W} / ${pageH(p)}` } });
     thumbObserver.observe(c);
     const item = h('button', { class: 'thumb-item' + (i === ed.cur ? ' active' : ''), 'data-i': i, onclick: () => scrollToPage(i) },
       h('div', { class: 'thumb-frame' }, c, p.bookmark ? h('span', { class: 'thumb-bm' }, icon('bookmarkFill', 14)) : null),
@@ -507,6 +564,7 @@ const thumbTimers = new Map();
 function scheduleThumb(page) {
   clearTimeout(thumbTimers.get(page.id));
   thumbTimers.set(page.id, setTimeout(() => {
+    if (ed.busy) return scheduleThumb(page); // not while the pen is down
     const c = thumbsEl.querySelector(`canvas[data-pid="${page.id}"]`);
     if (c) renderThumb(c, page, 220);
   }, 500));
@@ -647,6 +705,7 @@ export function updateChrome() {
   $('#btnRedo').disabled = !hist().redo.length;
   updateBookmarkBtn();
   $('#btnConflict').hidden = !ed.doc.conflicts?.length;
+  $('#btnAdd').hidden = ed.doc.pages.some(p => p.inf); // an infinite notebook is one growing page
   view.dataset.tool = ed.tool;
   document.querySelectorAll('.toolbtn').forEach(b => b.classList.toggle('active', b.dataset.tool === ed.tool));
 }
@@ -827,10 +886,13 @@ function penPopover(anchor) {
       const t = i / 89;
       return [30 + t * 220, 45 - Math.sin(t * Math.PI * 2 - 0.4) * 22, 0.25 + 0.6 * Math.sin(t * Math.PI)];
     });
-    drawStroke(ctx, {
-      tool: 'pen', pen: cfg.pen, color: getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#000',
-      width: Math.max(4, cfg.widths[cfg.width] * 2.4), sharp: cfg.sharp, press: cfg.press, points: pts,
-    });
+    const stroke = {
+      type: 'stroke', tool: 'pen', ink: 2, rad: 1, pen: cfg.pen, color: getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#000',
+      width: Math.max(4, cfg.widths[cfg.width] * 2.4), sharp: cfg.sharp, press: cfg.press,
+    };
+    const input = new PenInput(stroke, pts[0], 0, 1, cfg.stab);
+    pts.slice(1).forEach((p, i) => input.push(p, (i + 1) * 1000 / 120));
+    drawStroke(ctx, { ...stroke, points: input.finish() });
   }
 
   function slider(label, key) {

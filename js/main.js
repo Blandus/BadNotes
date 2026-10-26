@@ -92,9 +92,21 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 addEventListener('scroll', () => { if (scrollY || scrollX) scrollTo(0, 0); }, { passive: true });
 // The on-screen keyboard can shift the view without a scroll event; reset it when the keyboard
 // closes, the visible area changes, or the app comes back to the foreground.
-const unshift = () => { if (scrollY || scrollX || document.documentElement.scrollTop) scrollTo(0, 0); };
-addEventListener('focusout', () => setTimeout(unshift, 50));
-visualViewport?.addEventListener('resize', () => setTimeout(unshift, 50));
+// To bring a text field above the keyboard iOS also scrolls the visible area (visualViewport,
+// while window.scrollY stays 0) and containers that are not meant to scroll (overflow: hidden,
+// e.g. body), and may leave them there after the keyboard closes: put all of them back.
+const unshift = (from = document.activeElement) => {
+  scrollTo(0, 0);
+  for (let el = from?.parentElement; el; el = el.parentElement) {
+    if ((el.scrollTop || el.scrollLeft) && /hidden|clip/.test(getComputedStyle(el).overflow)) { el.scrollTop = 0; el.scrollLeft = 0; }
+  }
+  for (const el of [document.documentElement, document.body]) { el.scrollTop = 0; el.scrollLeft = 0; }
+};
+addEventListener('focusout', e => setTimeout(() => unshift(e.target), 50));
+// keyboard closed (also with the text field still focused, e.g. the iPad's hide-keyboard key)
+const keyboardOpen = () => visualViewport && innerHeight - visualViewport.height > 80;
+visualViewport?.addEventListener('resize', () => setTimeout(() => { if (!keyboardOpen()) unshift(); }, 50));
+visualViewport?.addEventListener('resize', () => setTimeout(() => { if (!keyboardOpen()) unshift(); }, 400));
 visualViewport?.addEventListener('scroll', () => { if (!document.activeElement?.matches('input, textarea, [contenteditable="true"]')) unshift(); });
 addEventListener('orientationchange', () => setTimeout(unshift, 300));
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') unshift(); });
