@@ -71,6 +71,10 @@
 /* ---------- Base ---------- */
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
+/* The document itself never scrolls (only the panes inside do). iPadOS 26 blurs content under the
+   status bar when it thinks the page is scrolled up (keyboard, rubber band), which made the header blurry. */
+html { overflow: hidden; overscroll-behavior: none; }
+body { position: fixed; inset: 0; width: 100%; }
 body {
   background: var(--bg); color: var(--text);
   font: 15px/1.5 var(--font); font-feature-settings: "cv11", "ss01";

@@ -84,3 +84,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   offerClipboardImport();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
 })();
+
+// If iPadOS still shifts the page (e.g. when the keyboard opens), put it back at once: a page
+// scrolled under the status bar gets blurred by the system.
+addEventListener('scroll', () => { if (scrollY || scrollX) scrollTo(0, 0); }, { passive: true });
