@@ -2,7 +2,7 @@ import { uid } from './util.js';
 import { toRadius } from './ink.js';
 
 // Shown in the settings, to check which version a device is running. Raise with each update.
-export const APP_VERSION = '55';
+export const APP_VERSION = '57';
 
 export const PAGE_W = 1000;
 export const FORMATS = { a4: { label: 'A4 Hoch', h: 1414 }, a4l: { label: 'A4 Quer', h: 707 }, letter: { label: 'Letter', h: 1294 } };
@@ -14,7 +14,7 @@ export const TEMPLATE_SECTIONS = [
   ['Herkömmlich', ['blank', 'dots', 'narrow', 'lined', 'grid']],
   ['Schreibpapier', ['cornell', 'notepad', 'twocol', 'threecol']],
 ];
-export const PAPERS = { white: { label: 'Weißes Papier', color: '#FFFFFF' }, yellow: { label: 'Gelbes Papier', color: '#FBF8EC' }, dark: { label: 'Dunkles Papier', color: '#2B2A2A' } };
+export const PAPERS = { white: { label: 'Weißes Papier', color: '#FFFFFF' }, yellow: { label: 'Gelbes Papier', color: '#FBF8EC' }, dark: { label: 'Dunkles Papier', color: '#333333' } };
 // Cover colours derived from the Folio palette (navy, mist, sage, stone) plus a few quiet accents — no red
 export const COVERS = ['#0F2747', '#3E6E9F', '#8EB8E6', '#6B8F7E', '#4F7A66', '#A7B4C6', '#D9D2C6', '#B8A68A', '#C9A35B', '#7D6B91', '#3A3F4A', '#E8E3D8'];
 

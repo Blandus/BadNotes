@@ -10,6 +10,7 @@ import {
 import { toast, popover, closePopover } from './ui.js';
 import { samplePiece, addSamplesToPath, strokeSamples, tipRadius } from './ink.js';
 import { PenInput, penPredictions } from './handwriting.js';
+import { recording, recBegin, recMove, recUp, recEnd } from './pencilrec.js';
 import { readRunsDom, renderRunsDom, selectionOffsets, setSelectionOffsets, styleAtPos, applyRange, normalize, runsOf } from './richtext.js';
 
 let overlay, octx;
@@ -77,8 +78,11 @@ function sizeOverlay() {
 // ---------- Geometry ----------
 // rect: the page's bounding box, cached for the duration of a stroke (reading layout per event is slow)
 // raw = true skips rounding (used for pen input, which is smoothed before it is stored)
-function toPage(e, el, r = el.getBoundingClientRect(), raw = false) {
-  const p = e.pointerType === 'pen' ? (Number.isFinite(e.pressure) ? e.pressure : 0.5) : 0.5;
+// pen: whether e comes from a pen. Coalesced events take it from their parent event: Safari's
+// may lack some fields (pointerId/target, reported by Flutter for iOS 18.2), and a missing
+// pointerType would lose the pressure of every in-between sample.
+function toPage(e, el, r = el.getBoundingClientRect(), raw = false, pen = e.pointerType === 'pen') {
+  const p = pen ? (Number.isFinite(e.pressure) ? e.pressure : 0.5) : 0.5;
   const pg = el._page;
   const x = pageX0(pg) + (e.clientX - r.left) / r.width * pageW(pg), y = pageY0(pg) + (e.clientY - r.top) / r.height * pageH(pg);
   return raw ? [x, y, p] : [r1(x), r1(y), Math.round(p * 100) / 100];
@@ -260,7 +264,10 @@ function start(e) {
   const pt = toPage(e, el, rect, ed.tool === 'pen');
   ed.busy = true;
   switch (ed.tool) {
-    case 'pen': case 'highlighter': case 'shapes': return startStroke(base, pt);
+    case 'pen': case 'highlighter': case 'shapes':
+      startStroke(base, pt);
+      if (drawing.input && recording()) recBegin(drawing, e, { zoom: ed.zoom, ppu: ppu(base), pageW: pageW(base.page), pageH: pageH(base.page), x0: pageX0(base.page), y0: pageY0(base.page), stab: T.pen.stab });
+      return;
     case 'eraser': return startErase(base, pt, e);
     case 'lasso': return startLasso(base, pt, e);
     case 'text': drawing = { ...base, kind: 'text', pt }; return; // acts on pointerup (keyboard focus needs a tap)
@@ -271,6 +278,7 @@ function start(e) {
 
 function onMove(e) {
   if (drawing && e.pointerId === drawing.id) {
+    const at = performance.now();
     e.preventDefault();
     if (e.pointerType === 'pen') lastPen = performance.now();
     let evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
@@ -279,12 +287,16 @@ function onMove(e) {
     if (d.kind === 'stroke') {
       if (d.straight) d.stroke.points = [d.stroke.points[0], toPage(e, d.el, d.rect)];
       else if (!d.snapped) {
-        for (const ev of evs) addPoint(d, toPage(ev, d.el, d.rect, true), ev.timeStamp);
-        // where the Pencil is about to be: drawn as a provisional tip, never stored
-        const predictions = !d.redraw && e.getPredictedEvents ? e.getPredictedEvents().map(ev => [...toPage(ev, d.el, d.rect, true), ev.timeStamp]) : [];
+        const pen = e.pointerType === 'pen';
+        for (const ev of evs) addPoint(d, toPage(ev, d.el, d.rect, true, pen), ev.timeStamp || e.timeStamp);
+        // where the Pencil is about to be: drawn as a provisional tip, never stored. Without
+        // browser predictions, the input extrapolates one frame ahead itself.
+        const predictions = !d.redraw && e.getPredictedEvents ? e.getPredictedEvents().map(ev => [...toPage(ev, d.el, d.rect, true, pen), ev.timeStamp]) : [];
         d.pred = d.input ? penPredictions(predictions, e.timeStamp, toPage(e, d.el, d.rect, true), ppu(d)) : predictions;
+        if (d.input && !d.pred.length) d.pred = d.input.extrapolate(frameMs);
       }
-      if (!d.snapped) { queueLive(); watchHold(d, e); }
+      if (!d.snapped) { liveNow(); watchHold(d, e); }
+      if (d.input) recMove(e, at); // Pencil diagnostics (no-op unless recording)
       else if (d.snapped.pts.length === 2 && !d.snapped.closed) {
         // Snapped line: keep holding and move to place the end point.
         const p = toPage(e, d.el, d.rect);
@@ -335,6 +347,7 @@ function onUp(e, ok) {
   // Safari cancels the pencil's pointer when it thinks the palm started a gesture; the ink
   // drawn up to that point is real, so a cancelled pen stroke is kept, not thrown away.
   if (drawing && e.pointerId === drawing.id) {
+    if (drawing.input) recUp(e);
     if (ok && drawing.input && !drawing.snapped) drawing.input.end(toPage(e, drawing.el, drawing.rect, true), e.timeStamp);
     finish(ok || (drawing.kind === 'stroke' && !drawing.touch));
   }
@@ -535,7 +548,7 @@ function cancelDrawing() {
   if (!d) return;
   clearTimeout(d.holdT);
   if (d.kind === 'erase' || d.kind === 'move' || d.kind === 'resize' || d.kind === 'textwidth' || d.kind === 'vertex') { d.page.elements = d.before; renderEl(d.el); renderSelection(); renderShapeHandles(); }
-  else if (d.kind === 'stroke') { if (!pendingInk) clearInk(); }
+  else if (d.kind === 'stroke') { if (!pendingInk) clearInk(); if (d.input) recEnd(null); }
   else renderEl(d.el);
   drawOverlay();
 }
@@ -551,6 +564,7 @@ function finish(ok) {
     if (snap) s = toShape(s, snap);
     else s = toRadius(s); // stored like Goodnotes: half width per point
     if (d.input && !snap) paintFinishedPen(d, s);
+    if (d.input) recEnd(snap ? null : s);
     if (snap) clearInk(); // the snapped shape differs from the rough live stroke
     // Pen gestures: scribble over something to erase it
     if (!snap && s.tool === 'pen' && !d.shapes && T.pen.scribble && isScribble(s.points)) {
@@ -732,6 +746,20 @@ function queueLive() {
   liveQueued = true;
   requestAnimationFrame(() => { liveQueued = false; drawLive(); });
 }
+// Draws right in the input event — the earliest moment the new points are known — at most once
+// per frame; more events within the same frame are drawn by the frame callback.
+let liveFrame = false, frameMs = 1000 / 60, lastFrame = 0;
+function liveNow() {
+  if (liveFrame) return queueLive();
+  liveFrame = true;
+  requestAnimationFrame(t => {
+    liveFrame = false;
+    // the display's frame time (60 or 120 Hz) — how far ahead the extrapolated tip reaches
+    if (lastFrame && t - lastFrame > 4 && t - lastFrame < 40) frameMs += (t - lastFrame - frameMs) * 0.2;
+    lastFrame = t;
+  });
+  drawLive();
+}
 function drawLive() {
   const d = drawing;
   if (!d || d.kind !== 'stroke') return;
@@ -801,10 +829,20 @@ function drawPenInk(d) {
     ictx.fillStyle = s.color; ictx.fill(path, 'nonzero');
   }
   const dpr = ink._dpr, scale = ppu(d) * dpr;
-  octx.setTransform(1, 0, 0, 1, 0, 0); octx.clearRect(0, 0, overlay.width, overlay.height);
-  octx.setTransform(scale, 0, 0, scale, (d.rect.left - d.stage.left) * dpr - pageX0(d.page) * scale, (d.rect.top - d.stage.top) * dpr - pageY0(d.page) * scale);
+  const ox = (d.rect.left - d.stage.left) * dpr - pageX0(d.page) * scale, oy = (d.rect.top - d.stage.top) * dpr - pageY0(d.page) * scale;
   const tail = [[d.prevMid[0], d.prevMid[1], d.prevR]];
   for (let i = d.drawn; i < p.length; i++) tail.push([p[i][0], p[i][1], radius(i)]);
+  // Only the area of the previous tail is cleared, not the whole screen-sized overlay: clearing
+  // (and handing the browser) ~5 million pixels every frame costs time on the iPad. The curve
+  // stays inside the hull of its points, widened by the largest radius.
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, rmax = 0;
+  for (const [x, y, r] of tail) { if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; if (r > rmax) rmax = r; }
+  const box = [Math.floor((x0 - rmax) * scale + ox) - 2, Math.floor((y0 - rmax) * scale + oy) - 2, Math.ceil((x1 + rmax) * scale + ox) + 2, Math.ceil((y1 + rmax) * scale + oy) + 2];
+  octx.setTransform(1, 0, 0, 1, 0, 0);
+  if (d.tailBox) octx.clearRect(d.tailBox[0], d.tailBox[1], d.tailBox[2] - d.tailBox[0], d.tailBox[3] - d.tailBox[1]);
+  else octx.clearRect(0, 0, overlay.width, overlay.height);
+  d.tailBox = box;
+  octx.setTransform(scale, 0, 0, scale, ox, oy);
   const path = new Path2D(); addSamplesToPath(path, strokeSamples(tail, i => tail[i][2]));
   octx.fillStyle = s.color; octx.fill(path, 'nonzero');
   // back to the overlay's own transform (sizeOverlay), so drawOverlay clears all of it

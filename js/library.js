@@ -10,6 +10,7 @@ import { sync, signIn, signOut, signedIn } from './sync.js';
 import { newTextDoc, openTextDoc, renderTextThumb, plainText, printDoc } from './textdoc.js';
 import { renderCalendar, CAL_KINDS } from './calendar.js';
 import { ensureLocal, offload, runOffload, recordSize, offloadOn, offloadMin, OFFLOAD_SIZES, keepFilesLocal } from './offload.js';
+import { recording, setRecording } from './pencilrec.js';
 
 const SECTIONS = {
   docs: { label: 'Alle Notizen', icon: 'notes' },
@@ -1262,7 +1263,9 @@ export async function openSettings() {
     h('div', { class: 'form-label' }, 'Stift'),
     h('div', { class: 'group-box' },
       toggle('Nur mit Stift zeichnen', !settings.fingerDraw, v => { settings.fingerDraw = !v; saveSettings(); }),
-      h('div', { class: 'hint' }, 'An: Finger scrollen und zoomen, nur der Apple Pencil zeichnet.')),
+      h('div', { class: 'hint' }, 'An: Finger scrollen und zoomen, nur der Apple Pencil zeichnet.'),
+      toggle('Pencil-Aufzeichnung (Diagnose)', recording(), v => setRecording(v)),
+      h('div', { class: 'hint' }, 'Zeichnet die Rohdaten deiner Stiftstriche auf (Positionen, Druck, Neigung, Zeiten), damit die Handschrift am Computer nachgestellt und mit Goodnotes verglichen werden kann. Unten erscheint eine Leiste: Testsatz schreiben, dann „Sichern“ → Datei teilen oder in Dateien sichern. Bleibt nur auf diesem Gerät, bis du sie teilst.')),
     h('div', { class: 'form-label' }, 'Synchronisation'),
     account,
     h('div', { class: 'group-box', style: { marginTop: '10px' } },

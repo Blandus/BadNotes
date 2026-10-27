@@ -74,12 +74,8 @@ export function drawTemplate(ctx, t, h, dark = false) {
   const vlines = (xs, top, bottom = h - 30) => { ctx.beginPath(); for (const x of xs) { ctx.moveTo(x, top); ctx.lineTo(x, bottom); } ctx.stroke(); };
   if (t === 'lined') { lines(40, 120); margin(100); }
   else if (t === 'narrow') { lines(30, 100); margin(90); }
-  else if (t === 'grid') {
-    ctx.beginPath();
-    for (let x = 25; x < PAGE_W; x += 25) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
-    for (let y = 25; y < h; y += 25) { ctx.moveTo(0, y); ctx.lineTo(PAGE_W, y); }
-    ctx.stroke();
-  } else if (t === 'dots') {
+  else if (t === 'grid') goodnotesGrid(ctx, 0, 0, PAGE_W, h, PAGE_W / pagePt(h), dark);
+  else if (t === 'dots') {
     for (let x = 25; x < PAGE_W; x += 25) for (let y = 25; y < h; y += 25) ctx.fillRect(x - 1.4, y - 1.4, 2.8, 2.8);
   } else if (t === 'cornell') {
     const bottom = h - Math.round(h * 0.2);
@@ -104,12 +100,32 @@ export function drawTemplate(ctx, t, h, dark = false) {
   ctx.restore();
 }
 
+// Squared paper exactly like Goodnotes' "Kariert" (measured from its PDF template, A4
+// 595.28 × 841.89 pt): a line every 16 pt, 0.5 pt wide, the first at 15.5 pt from the top and
+// left edge (drawn as filled bars like there); #D0D2D3 on white, #58595B on dark (#333333) paper.
+// u = page units per point; the grid starts at the page origin and runs over x0..x1 × y0..y1.
+function goodnotesGrid(ctx, x0, y0, x1, y1, u, dark) {
+  const gap = 16 * u, lw = 0.5 * u, first = 15.5 * u;
+  ctx.save();
+  ctx.fillStyle = dark ? '#58595B' : '#D0D2D3';
+  const from = v => first + Math.ceil((v - first) / gap) * gap;
+  for (let x = from(x0); x + lw <= x1; x += gap) ctx.fillRect(x, y0, lw, y1 - y0);
+  for (let y = from(y0); y + lw <= y1; y += gap) ctx.fillRect(x0, y, x1 - x0, lw);
+  ctx.restore();
+}
+// Paper width in points for a page of PAGE_W × h units: A4 or Letter, portrait or landscape.
+function pagePt(h) {
+  const r = h / PAGE_W, near = (a, b, c) => Math.abs(a - b) < Math.abs(a - c);
+  return r >= 1 ? (near(r, 11 / 8.5, 841.89 / 595.28) ? 612 : 595.28) : (near(1 / r, 11 / 8.5, 841.89 / 595.28) ? 792 : 841.89);
+}
+
 // Infinite pages: lines, grid or dots continue across the whole area (no margins or headers).
 function drawInfiniteTemplate(ctx, page) {
   const t = page.template, dark = page.paper === 'dark';
   if (!t || t === 'blank') return;
   const x0 = pageX0(page), y0 = pageY0(page), x1 = x0 + pageW(page), y1 = y0 + pageH(page);
-  const g = t === 'dots' || t === 'grid' ? 25 : t === 'narrow' ? 30 : 40;
+  if (t === 'grid') return goodnotesGrid(ctx, x0, y0, x1, y1, PAGE_W / 595.28, dark);
+  const g = t === 'dots' ? 25 : t === 'narrow' ? 30 : 40;
   const from = v => Math.ceil(v / g) * g;
   ctx.save();
   ctx.lineWidth = 1;

@@ -23,9 +23,10 @@ const rp = v => Math.round(v * 100) / 100;
 // the points around one corner only the sharpest is kept (the tip of a v, z, k). Measuring over
 // a distance, not over 3 samples (as before v55), keeps sensor noise of slow strokes — samples
 // ~0.4 px apart — from being taken for corners and left unsmoothed.
-// Radii (pressure): plain Gaussian along the arc length, so the width swells and thins calmly.
-// px: centre line (stabilisation raises it up to 4×), width, corner test, point spacing
-export const SMOOTH = { sigma: 1.4, sigmaR: 4, corner: 2, step: 0.4 };
+// Radii (pressure): plain Gaussian along the arc length (σ 10 px), so the width swells and thins
+// calmly: the hand's pressure flutters at 5–10 Hz, which made both edges bulge every 10–20 px.
+// px: centre line (stabilisation raises it up to 4×), width, corner test, point spacing, end hooks
+export const SMOOTH = { sigma: 1.4, sigmaR: 10, corner: 2, step: 0.4, hook: 3 };
 function cornersOf(p, s, dc) {
   const n = p.length, cos = new Float64Array(n).fill(1);
   for (let i = 1, a = 0, b = 1; i < n - 1; i++) {
@@ -119,6 +120,9 @@ export class PenInput {
     const next = [point[0], point[1], mix(this.filtered[2], clamp(point[2], 0, 1), alpha(25, dt))];
     this.filtered = next;
     this.raw = point.slice();
+    const h = this.hist || (this.hist = []);
+    h.push([point[0], point[1], this.time]);
+    if (h.length > 12) h.shift();
     const radius = pieceWidth(this.stroke, next[2]) / 2;
     this.dotRadius = Math.max(this.dotRadius, radius);
     // Samples closer than SMOOTH.step to the last point are averaged, not dropped: a slow stroke
@@ -134,6 +138,25 @@ export class PenInput {
     this.points.push(q);
   }
 
+  // A provisional tip one frame (ms) ahead, for browsers that give no predicted events: the
+  // pen's velocity over the last ~10 ms, damped and at most 12 px long. Shown on the replaceable
+  // tail only and replaced by the real points in the next frame; never stored.
+  extrapolate(ms) {
+    const h = this.hist;
+    if (!h || h.length < 2) return [];
+    const now = h[h.length - 1];
+    let old = h[h.length - 2];
+    for (let i = h.length - 2; i >= 0; i--) { old = h[i]; if (now[2] - old[2] >= 10) break; }
+    const dt = now[2] - old[2];
+    if (dt < 4) return [];
+    const k = 0.8 * ms / dt, max = 12 / this.scale;
+    let dx = (now[0] - old[0]) * k, dy = (now[1] - old[1]) * k;
+    const len = Math.hypot(dx, dy);
+    if (len * this.scale < 0.5) return [];
+    if (len > max) { dx *= max / len; dy *= max / len; }
+    return [[now[0] + dx, now[1] + dy, this.filtered[2], now[2] + ms]];
+  }
+
   // A released Pencil normally reports zero pressure. Use its final position without
   // replacing the last contact pressure with a fabricated medium-pressure value.
   end(point, time) {
@@ -147,7 +170,39 @@ export class PenInput {
   // again: they are cached, and each frame only re-smooths the last stretch, starting far
   // enough back that the result is exactly that of smoothing the whole stroke. The cost per
   // frame stays constant however long the stroke gets (long lines on infinite pages).
+  // Hooks: the Pencil often slides a little when it touches down or lifts off, which left a
+  // small comma or knob at a stroke's ends (Goodnotes shows none). A sharp turn (> 72°) within
+  // the first / last HOOK px is cut off. The start is decided once 2 × HOOK px are written —
+  // long before anything is painted permanently — the end when the stroke is finished.
+  dehook(atEnd) {
+    const acc = this.points, lens = this.lens, n = acc.length, D = SMOOTH.hook / this.scale, total = lens[n - 1];
+    if (total < 4 * D) return;
+    const pos = k => atEnd ? acc[n - 1 - k] : acc[k], len = k => atEnd ? total - lens[n - 1 - k] : lens[k];
+    let cut = 0, sharpest = 0.3; // cos: turns sharper than ~72°
+    for (let i = 1, j = 2; i < n - 1 && len(i) <= D; i++) {
+      if (j <= i) j = i + 1;
+      while (j < n - 1 && len(j) - len(i) < D) j++;
+      const a = pos(i), o = pos(0), b = pos(j);
+      const ax = a[0] - o[0], ay = a[1] - o[1], bx = b[0] - a[0], by = b[1] - a[1];
+      const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
+      if (la * this.scale < 0.3 || !lb) continue;
+      const c = (ax * bx + ay * by) / (la * lb);
+      if (c < sharpest) { sharpest = c; cut = i; }
+    }
+    if (!cut) return;
+    if (atEnd) {
+      acc.length = n - cut; lens.length = n - cut;
+      this.raw = [acc[n - cut - 1][0], acc[n - cut - 1][1], this.raw[2]];
+    } else {
+      // in place: the stroke being drawn shares this array
+      const off = lens[cut];
+      acc.splice(0, cut); lens.splice(0, cut);
+      for (let k = 0; k < lens.length; k++) lens[k] -= off;
+    }
+  }
+
   view() {
+    if (!this.hookDone && this.lens[this.lens.length - 1] >= 2 * SMOOTH.hook / this.scale) { this.hookDone = true; this.dehook(false); }
     const acc = this.points, lens = this.lens, n = acc.length;
     const sigma = SMOOTH.sigma * (1 + 3 * this.stabilization) / this.scale, sigmaR = SMOOTH.sigmaR / this.scale;
     const dc = SMOOTH.corner / this.scale;
@@ -181,6 +236,8 @@ export class PenInput {
   }
 
   finish() {
+    this.view(); // decides the start hook of a short stroke, too
+    this.dehook(true);
     const view = this.view();
     if (view.total * this.scale < 0.35) {
       return [[this.points[0][0], this.points[0][1], round(this.dotRadius)]];
