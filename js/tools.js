@@ -312,11 +312,13 @@ function onMove(e) {
         const pen = e.pointerType === 'pen';
         for (const ev of evs) addPoint(d, toPage(ev, d.el, d.rect, true, pen), ev.timeStamp || e.timeStamp);
         // where the Pencil is about to be: drawn as a provisional tip, never stored. Folio's own
-        // prediction reaches to about when this frame is on screen (now + one frame); the
-        // browser's predicted events (only ~8 ms ahead in Safari) are the fallback.
+        // prediction looks 8 ms ahead (as far as Safari's). Reaching a whole frame ahead (v64)
+        // brought the tip closer on average but made it jump back in 17 % of the frames and wander
+        // up to 3 px beside the path — the line glitched. At 8 ms: 3 % (as without prediction) and
+        // 0.9 px (Safari's own: 4.6 %, 1.4 px). The browser's predicted events are the fallback.
         const predictions = !d.redraw && e.getPredictedEvents ? e.getPredictedEvents().map(ev => [...toPage(ev, d.el, d.rect, true, pen), ev.timeStamp]) : [];
         d.pred = d.input ? penPredictions(predictions, e.timeStamp, toPage(e, d.el, d.rect, true), ppu(d)) : predictions;
-        if (d.input) { const own = d.input.predict(performance.now() - d.input.time + frameMs); if (own.length) d.pred = own; }
+        if (d.input) { const own = d.input.predict(PREDICT_MS); if (own.length) d.pred = own; }
       }
       if (!d.snapped) { liveNow(); watchHold(d, e); }
       else if (d.snapped.pts.length === 2 && !d.snapped.closed) {
@@ -838,16 +840,12 @@ function queueLive() {
 }
 // Draws right in the input event — the earliest moment the new points are known — at most once
 // per frame; more events within the same frame are drawn by the frame callback.
-let liveFrame = false, frameMs = 1000 / 60, lastFrame = 0;
+let liveFrame = false;
+const PREDICT_MS = 8; // how far ahead the provisional tip reaches (see onMove)
 function liveNow() {
   if (liveFrame) return queueLive();
   liveFrame = true;
-  requestAnimationFrame(t => {
-    liveFrame = false;
-    // the display's frame time (60 or 120 Hz) — how far ahead the predicted tip reaches
-    if (lastFrame && t - lastFrame > 4 && t - lastFrame < 40) frameMs += (t - lastFrame - frameMs) * 0.2;
-    lastFrame = t;
-  });
+  requestAnimationFrame(() => { liveFrame = false; });
   drawLive();
 }
 function drawLive() {

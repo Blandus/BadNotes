@@ -234,12 +234,11 @@ export class PenInput {
   }
 
   // Where the pen will be h ms after its last sample — the provisional tip shown on the replaceable
-  // tail, replaced by the real points in the next frame and never stored. Measured on recorded
-  // Pencil writing: the line reaches the screen about a frame after the event, and Safari's own
-  // predicted events reach only ~8 ms ahead, so the drawn tip trailed the pen by 4.2 px (median,
-  // 7.5 px without prediction). A quadratic least-squares fit of the last 24 ms, extrapolated with
-  // 80 % of the time and never further than 1.2× the distance the pen moved in the same time
-  // just before (no jumps at turns), trails by 2.4 px. Returns [] with too few samples.
+  // tail, replaced by the real points in the next frame and never stored: a quadratic least-squares
+  // fit of the last 24 ms, extrapolated with 80 % of the time and never further than 1.2× the
+  // distance the pen moved in the same time just before. Used 8 ms ahead (tools.js): on recorded
+  // Pencil writing as calm as no prediction; longer horizons made the tip jump about.
+  // Returns [] with too few samples.
   predict(h) {
     const hs = this.hist;
     if (!hs || hs.length < 4 || !(h > 0)) return [];
