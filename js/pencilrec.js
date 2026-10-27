@@ -44,7 +44,7 @@ export function setRecording(on) {
 }
 const update = () => {
   if (!badge) return;
-  const n = rec.strokes.length, idle = rec.idle ? fps(rec.idle) : null;
+  const n = rec.strokes.length, last = rec.idleAfter || rec.idle, idle = last ? fps(last) : null;
   badge.querySelector('.rec-count').textContent = `Pencil-Aufzeichnung · ${n} ${n === 1 ? 'Strich' : 'Striche'}`
     + (idle ? ` · Ruhe ${idle} fps` : '') + (rec.lastFps ? ` · Schreiben ${rec.lastFps} fps` : '');
 };
@@ -82,7 +82,7 @@ export function recEnd(s) {
   update();
   // idle frame rate once the hand rests (measured again after a pause in writing)
   clearTimeout(rec.idleT);
-  rec.idleT = setTimeout(() => { if (!cur && rec.on) idleFrames(600).then(g => { if (!cur) { rec.idleAfter = g; rec.idle = g; update(); } }); }, 1500);
+  rec.idleT = setTimeout(() => { if (!cur && rec.on) idleFrames(600).then(g => { if (!cur) { rec.idleAfter = g; update(); } }); }, 1500);
 }
 
 async function save() {
