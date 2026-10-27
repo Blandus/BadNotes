@@ -29,9 +29,10 @@ const rp = v => Math.round(v * 100) / 100;
 // and fuller with the pressure, as the same sentence written in Goodnotes shows.
 // px: centre line (stabilisation raises it up to 4×), width, corner test, point spacing, end hooks,
 // curve-fit tolerance of the stored stroke (0 keeps every point); fitR: its radius tolerance (share);
+// fitEdge / fitGap: a key point that far from piece ends / keys at most that far apart (px);
 // start: how far a stroke's first pressure is raised towards the usual one (the Pencil reports
 // ~0.08 for its first few samples, which made starts thinner than in Goodnotes)
-export const SMOOTH = { sigma: 1.4, sigmaR: 6, corner: 3, cornerDeg: 75, step: 0.4, hook: 5, fit: 0.4, fitR: 0.15, start: 0.5 };
+export const SMOOTH = { sigma: 1.4, sigmaR: 6, corner: 3, cornerDeg: 75, step: 0.4, hook: 5, fit: 0.25, fitR: 0.15, fitEdge: 1.5, fitGap: 8, start: 0.5 };
 function cornersOf(p, s, dc) {
   const cosMax = Math.cos(SMOOTH.cornerDeg * Math.PI / 180);
   const n = p.length, cos = new Float64Array(n).fill(1);
@@ -86,8 +87,13 @@ function smoothLine(points, s, sigma, sigmaR, dc) {
 // points (Douglas–Peucker: centre within tol, radius within 4 %), and the control points are
 // solved so that Folio's curve (quadratic pieces between control-point midpoints, ink.js) runs
 // through every key point — fewer points, the same shape within tol.
-function keyPoints(p, tol) {
+// Two more rules (v62): keys at most `gap` apart along the line, and one key `edge` after the start
+// and before the end of every piece. Without them a nearly straight l or t kept only its two ends
+// and became a ruler-straight line, and the straight run-out of Folio's curve at stroke ends and
+// corners (up to the middle of the last two control points) grew long and visible.
+function keyPoints(p, tol, edge = 0, gap = Infinity) {
   const n = p.length, keep = new Uint8Array(n); keep[0] = keep[n - 1] = 1;
+  const s = [0]; for (let i = 1; i < n; i++) s.push(s[i - 1] + dist(p[i - 1], p[i]));
   const stack = [[0, n - 1]];
   while (stack.length) {
     const [a, b] = stack.pop();
@@ -101,6 +107,15 @@ function keyPoints(p, tol) {
     }
     if (wi >= 0) { keep[wi] = 1; stack.push([a, wi], [wi, b]); }
   }
+  if (s[n - 1] > 3 * edge) {
+    let i = 1; while (i < n - 1 && s[i] < edge) i++; keep[i] = 1;
+    let j = n - 2; while (j > 0 && s[n - 1] - s[j] < edge) j--; keep[j] = 1;
+  }
+  for (let a = 0; a < n - 1;) {
+    let b = a + 1; while (!keep[b]) b++;
+    if (s[b] - s[a] > gap && b - a > 1) { let m = a + 1; while (m < b - 1 && s[m] - s[a] < (s[b] - s[a]) / 2) m++; keep[m] = 1; continue; }
+    a = b;
+  }
   return p.filter((_, i) => keep[i]);
 }
 // Control points C (C0 = first, Cm = last key point) such that the middle of every curved piece
@@ -111,8 +126,8 @@ function keyPoints(p, tol) {
 // control point: Folio's curve then runs straight into it and out of it — the tip of a v or z
 // stays sharp (one smooth fit across it rounded tips off by ~3 page units). After a corner the
 // first curved piece starts at the middle of C0–C1, so its row is (C0 + 6 C1 + C2) / 8 as well.
-function fitPiece(points, tol, afterCorner) {
-  const K = keyPoints(points, tol), m = K.length - 1;
+function fitPiece(points, tol, afterCorner, edge, gap) {
+  const K = keyPoints(points, tol, edge, gap), m = K.length - 1;
   if (m < 2) return K;
   const n = m - 1, b0 = afterCorner ? 0.75 : 0.625, a0 = afterCorner ? 0.125 : 0.25;
   const solve = c => {
@@ -130,12 +145,12 @@ function fitPiece(points, tol, afterCorner) {
   return [K[0], ...K.slice(1, m).map((k, i) => [rp(X[i]), rp(Y[i]), k[2]]), K[m]];
 }
 // corner: flags per point (cornersOf)
-export function fitCurve(points, tol, corner) {
+export function fitCurve(points, tol, corner, edge = 0, gap = Infinity) {
   if (points.length < 4) return points;
   let out = [], s = 0;
   for (let i = 1; i < points.length; i++) {
     if (i < points.length - 1 && !corner?.[i]) continue;
-    const part = fitPiece(points.slice(s, i + 1), tol, s > 0);
+    const part = fitPiece(points.slice(s, i + 1), tol, s > 0, edge, gap);
     out = out.length ? out.concat(part) : part; // the corner point is in both: doubled
     s = i;
   }
@@ -324,7 +339,7 @@ export class PenInput {
     }
     const pts = view.points.map((p, i) => [p[0], p[1], round(tipRadius(this.stroke, p[2], view.lengths[i], view.total))]);
     if (!SMOOTH.fit) return pts;
-    return fitCurve(pts, SMOOTH.fit / this.scale, cornersOf(pts, view.lengths, SMOOTH.corner / this.scale));
+    return fitCurve(pts, SMOOTH.fit / this.scale, cornersOf(pts, view.lengths, SMOOTH.corner / this.scale), SMOOTH.fitEdge / this.scale, SMOOTH.fitGap / this.scale);
   }
 }
 
