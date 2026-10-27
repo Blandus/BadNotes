@@ -1,5 +1,5 @@
 import { PAGE_W, PAPERS } from './store.js';
-import { r1 } from './util.js';
+import { r2 } from './util.js';
 import { fillStroke } from './ink.js';
 import { layout, drawRich, LINE_H } from './richtext.js';
 import { drawPdfPage } from './pdfdoc.js';
@@ -255,7 +255,7 @@ export function transformEl(e, fn, k = 1) {
   if (e.type === 'stroke') {
     // radius strokes scale their per-point radius with the size; pressure stays pressure
     const r = e.rad ? v => Math.round(v * k * 100) / 100 : v => v;
-    return { ...e, width: e.width * k, points: e.points.map(p => { const [x, y] = fn(p[0], p[1]); return [r1(x), r1(y), r(p[2])]; }) };
+    return { ...e, width: e.width * k, points: e.points.map(p => { const [x, y] = fn(p[0], p[1]); return [r2(x), r2(y), r(p[2])]; }) };
   }
   const [x, y] = fn(e.x, e.y);
   if (e.type === 'text') return { ...e, x, y, w: e.w * k, size: e.size * k, ...(e.runs ? { runs: e.runs.map(r => (r.size ? { ...r, size: r.size * k } : r)) } : {}) };

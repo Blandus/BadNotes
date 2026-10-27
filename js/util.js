@@ -2,6 +2,7 @@ export const $ = (s, root = document) => root.querySelector(s);
 export const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 export const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 export const r1 = v => Math.round(v * 10) / 10;
+export const r2 = v => Math.round(v * 100) / 100; // handwriting positions (sharp at high zoom)
 export const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
 // Tiny hyperscript helper: h('button', {class: 'x', onclick}, 'Label', childEl)

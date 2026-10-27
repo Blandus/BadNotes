@@ -1,5 +1,5 @@
 // Pointer input on pages: drawing, erasing, lasso selection, shapes, text, laser, gestures.
-import { $, h, uid, r1 } from './util.js';
+import { $, h, uid, r1, r2 } from './util.js';
 import { icon } from './icons.js';
 import { settings } from './store.js';
 import { bbox, unionBox, transformEl, drawStroke, pageH, pageW, pageX0, pageY0, renderPage, LINE_H, pieceWidth, toRadius, fontFamily } from './render.js';
@@ -164,7 +164,7 @@ function densify(pts, step) {
     const n = Math.floor(Math.hypot(b[0] - a[0], b[1] - a[1]) / step);
     for (let k = 1; k < n; k++) {
       const t = k / n;
-      out.push([r1(a[0] + (b[0] - a[0]) * t), r1(a[1] + (b[1] - a[1]) * t), a[2] + (b[2] - a[2]) * t]);
+      out.push([r2(a[0] + (b[0] - a[0]) * t), r2(a[1] + (b[1] - a[1]) * t), a[2] + (b[2] - a[2]) * t]);
     }
     out.push(b);
   }

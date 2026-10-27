@@ -1,5 +1,5 @@
-// Preserve the proven centreline smoothing: quantized input must stay round when enlarged.
-// Pressure filtering and temporary prediction remain independent of the position filter.
+// Pencil input → stored centre line: smoothed along the stroke in screen pixels (shape-preserving),
+// corners kept; pressure filtered separately; predictions are temporary and never stored.
 import { pieceWidth, tipRadius } from './ink.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -7,31 +7,69 @@ const alpha = (cutoff, dt) => 1 / (1 + 1 / (2 * Math.PI * cutoff * dt));
 const mix = (a, b, t) => a + (b - a) * t;
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 const round = v => Math.round(v * 1000) / 1000;
-const r1 = v => Math.round(v * 10) / 10;
-const MIN_STEP = 0.4; // CSS px, as in the original input path
-const K = 3;
+// Positions are kept to 0.01 page units: 0.1 (as before v55) made a visible staircase at high
+// zoom (at 1000 % one unit is ~17 device pixels on an iPad).
+const rp = v => Math.round(v * 100) / 100;
 
-// The original finishing filter, also used for the replaceable live tail. Detect corners
-// over several accepted points, not consecutive subpixel steps in a quantized input grid.
-function smoothPositions(points, stabilization) {
-  if (points.length < 4) return points;
-  const corner = new Uint8Array(points.length);
-  for (let i = K; i < points.length - K; i++) {
-    const ax = points[i][0] - points[i - K][0], ay = points[i][1] - points[i - K][1];
-    const bx = points[i + K][0] - points[i][0], by = points[i + K][1] - points[i][1];
+// ---------- Centre line filter (also used for the replaceable live tail) ----------
+// Smoothing is measured along the stroke in screen pixels at the zoom it is written at, not in
+// samples: a per-sample filter (as before v55) was weak on slow strokes (jittery edges) and
+// strong on fast ones (small loops of e, l, o pulled in by up to 9 %, tips of v and z rounded).
+// Positions: Gaussian average along the arc length, "twiced" (2·G − G∘G, Tukey): jitter shorter
+// than ~3 px is removed, while the shape of letters is kept almost exactly (the shrinking of a
+// plain average cancels to second order). Corners and both ends keep their position; the
+// average never reaches across them.
+// Corners: the direction over CORNER px before and after a point turns by more than 60°; of
+// the points around one corner only the sharpest is kept (the tip of a v, z, k). Measuring over
+// a distance, not over 3 samples (as before v55), keeps sensor noise of slow strokes — samples
+// ~0.4 px apart — from being taken for corners and left unsmoothed.
+// Radii (pressure): plain Gaussian along the arc length, so the width swells and thins calmly.
+// px: centre line (stabilisation raises it up to 4×), width, corner test, point spacing
+export const SMOOTH = { sigma: 1.4, sigmaR: 4, corner: 2, step: 0.4 };
+function cornersOf(p, s, dc) {
+  const n = p.length, cos = new Float64Array(n).fill(1);
+  for (let i = 1, a = 0, b = 1; i < n - 1; i++) {
+    while (a + 1 < i && s[i] - s[a + 1] >= dc) a++; // last point at least dc before i
+    if (b <= i) b = i + 1;
+    while (b < n - 1 && s[b] - s[i] < dc) b++; // first point at least dc after i
+    if (s[i] - s[a] < dc || s[b] - s[i] < dc) continue; // too close to an end to tell
+    const ax = p[i][0] - p[a][0], ay = p[i][1] - p[a][1], bx = p[b][0] - p[i][0], by = p[b][1] - p[i][1];
     const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
-    if (la && lb && (ax * bx + ay * by) / (la * lb) < 0.5) {
-      for (let j = i - 1; j <= i + 1; j++) corner[j] = 1;
-    }
+    if (la && lb) cos[i] = (ax * bx + ay * by) / (la * lb);
   }
-  let p = points;
-  for (let pass = 0; pass < 3 + Math.round(stabilization * 4); pass++) {
-    p = p.map((q, i) => i === 0 || i === p.length - 1 || corner[i] ? q : [
-      r1((p[i - 1][0] + 2 * q[0] + p[i + 1][0]) / 4),
-      r1((p[i - 1][1] + 2 * q[1] + p[i + 1][1]) / 4), q[2],
-    ]);
+  // keep a candidate only where it is the sharpest within dc on both sides (ties: the first)
+  const corner = new Uint8Array(n);
+  for (let i = 1; i < n - 1; i++) {
+    if (cos[i] >= 0.5) continue;
+    let best = true;
+    for (let j = i - 1; best && j > 0 && s[i] - s[j] <= dc; j--) if (cos[j] <= cos[i]) best = false;
+    for (let j = i + 1; best && j < n - 1 && s[j] - s[i] <= dc; j++) if (cos[j] < cos[i]) best = false;
+    if (best) corner[i] = 1;
   }
-  return p;
+  return corner;
+}
+// Gaussian average of v by arc length s (window ±3σ). Fixed entries keep their value and end
+// the window (they are included, nothing beyond them).
+function blur(v, s, sigma, fixed) {
+  const n = v.length, out = new Float64Array(n), lim = 3 * sigma, k = -1 / (2 * sigma * sigma);
+  for (let i = 0; i < n; i++) {
+    if (fixed && fixed[i]) { out[i] = v[i]; continue; }
+    let sum = v[i], wsum = 1;
+    for (let j = i - 1; j >= 0 && s[i] - s[j] <= lim; j--) { const w = Math.exp(k * (s[i] - s[j]) ** 2); sum += w * v[j]; wsum += w; if (fixed && fixed[j]) break; }
+    for (let j = i + 1; j < n && s[j] - s[i] <= lim; j++) { const w = Math.exp(k * (s[j] - s[i]) ** 2); sum += w * v[j]; wsum += w; if (fixed && fixed[j]) break; }
+    out[i] = sum / wsum;
+  }
+  return out;
+}
+// points [x, y, r] with cumulative arc lengths s; sigma, sigmaR, dc (corner distance) in page units
+function smoothLine(points, s, sigma, sigmaR, dc) {
+  const n = points.length;
+  if (n < 3) return points.map(q => [rp(q[0]), rp(q[1]), q[2]]);
+  const fixed = cornersOf(points, s, dc); fixed[0] = fixed[n - 1] = 1;
+  const twice = v => { const g = blur(v, s, sigma, fixed), gg = blur(g, s, sigma, fixed); return g.map((x, i) => 2 * x - gg[i]); };
+  const x = twice(points.map(q => q[0])), y = twice(points.map(q => q[1]));
+  const r = blur(points.map(q => q[2]), s, sigmaR, null);
+  return points.map((_, i) => [rp(x[i]), rp(y[i]), r[i]]);
 }
 
 // Mouse and finger report no pressure (always 0.5). Their pressure is simulated from the
@@ -51,10 +89,13 @@ export class PenInput {
     this.lastTime = this.time; this.moved = 0; this.elapsed = 0; // speed measurement (simulated pressure)
     this.dt = 1 / 120;
     this.raw = point.slice();
-    this.filtered = point.slice();
-    this.positionReady = false;
-    this.dotRadius = pieceWidth(stroke, point[2]) / 2;
-    this.points = [[r1(point[0]), r1(point[1]), this.dotRadius]];
+    // The Pencil's first contact sample often carries a pressure spike; starting the pressure
+    // filter there made a knob at the start of many strokes. Start at most at medium pressure
+    // and let the filter follow the real pressure from there.
+    this.filtered = [point[0], point[1], Math.min(point[2], 0.5)];
+    this.dotRadius = pieceWidth(stroke, this.filtered[2]) / 2;
+    this.points = [[rp(point[0]), rp(point[1]), this.dotRadius]];
+    this.lens = [0]; // arc length of this.points
   }
 
   push(point, time) {
@@ -73,20 +114,24 @@ export class PenInput {
       }
       point = [point[0], point[1], simulatedPressure(this.speed)];
     }
-    const a = 0.65 - 0.55 * this.stabilization;
-    const p = clamp(point[2], 0, 1);
-    const next = [
-      this.positionReady ? mix(this.filtered[0], point[0], a) : point[0],
-      this.positionReady ? mix(this.filtered[1], point[1], a) : point[1],
-      mix(this.filtered[2], p, alpha(25, dt)),
-    ];
-    this.positionReady = true;
+    // Positions are taken as they come (no lag behind the pen); the centre line filter removes
+    // the jitter. Pressure gets a light causal filter here and the calm one along the stroke.
+    const next = [point[0], point[1], mix(this.filtered[2], clamp(point[2], 0, 1), alpha(25, dt))];
     this.filtered = next;
     this.raw = point.slice();
     const radius = pieceWidth(this.stroke, next[2]) / 2;
     this.dotRadius = Math.max(this.dotRadius, radius);
-    if (dist(this.points[this.points.length - 1], next) < MIN_STEP / this.scale) return;
-    this.points.push([r1(next[0]), r1(next[1]), radius]);
+    // Samples closer than SMOOTH.step to the last point are averaged, not dropped: a slow stroke
+    // gives several samples per point, and their mean is steadier than any single one.
+    const b = this.bucket || (this.bucket = [0, 0, 0]);
+    b[0] += next[0]; b[1] += next[1]; b[2]++;
+    const last = this.points[this.points.length - 1];
+    const mean = [b[0] / b[2], b[1] / b[2]];
+    if (dist(last, mean) < SMOOTH.step / this.scale) return;
+    const q = [rp(mean[0]), rp(mean[1]), radius];
+    this.bucket = null;
+    this.lens.push(this.lens[this.lens.length - 1] + dist(last, q));
+    this.points.push(q);
   }
 
   // A released Pencil normally reports zero pressure. Use its final position without
@@ -97,22 +142,32 @@ export class PenInput {
   }
 
   // The smoothed centre line so far. A smoothed point depends only on input points within
-  // REACH of it (pass count + corner window), so points that far from the end never change
-  // again: they are cached, and each frame only re-smooths the last stretch. That keeps the
-  // cost per frame constant however long the stroke gets (long lines on infinite pages).
-  // Starting the stretch REACH before the first uncached point gives exactly the same values
-  // as smoothing the whole stroke.
+  // REACH along the stroke (6σ for the twiced centre line or 3σ for the width, plus 2× the
+  // corner distance) and at most one point beyond. Points that far from the end never change
+  // again: they are cached, and each frame only re-smooths the last stretch, starting far
+  // enough back that the result is exactly that of smoothing the whole stroke. The cost per
+  // frame stays constant however long the stroke gets (long lines on infinite pages).
   view() {
-    const acc = this.points, passes = 3 + Math.round(this.stabilization * 4), REACH = passes + K + 3;
-    const sm = this.sm || (this.sm = { points: [], lengths: [] });
-    const start = Math.max(0, sm.points.length - REACH);
-    const part = acc.slice(start);
-    if (dist(acc[acc.length - 1], this.raw) > MIN_STEP / this.scale) {
-      part.push([r1(this.raw[0]), r1(this.raw[1]), pieceWidth(this.stroke, this.filtered[2]) / 2]);
+    const acc = this.points, lens = this.lens, n = acc.length;
+    const sigma = SMOOTH.sigma * (1 + 3 * this.stabilization) / this.scale, sigmaR = SMOOTH.sigmaR / this.scale;
+    const dc = SMOOTH.corner / this.scale;
+    const REACH = Math.max(6 * sigma, 3 * sigmaR) + 2 * dc;
+    const sm = this.sm || (this.sm = { points: [], lengths: [], start: 0 });
+    const f = sm.points.length;
+    // first input point of the stretch: nothing it (or the cut-off corner test right after it)
+    // touches can reach the points from f on
+    const ok = s => s + 3 <= f && lens[f] - lens[s + 3] > REACH + dc;
+    while (ok(sm.start + 1)) sm.start++;
+    const start = sm.start;
+    const part = acc.slice(start), s = lens.slice(start);
+    if (dist(acc[n - 1], this.raw) > SMOOTH.step / this.scale) {
+      const q = [rp(this.raw[0]), rp(this.raw[1]), pieceWidth(this.stroke, this.filtered[2]) / 2];
+      s.push(s[s.length - 1] + dist(acc[n - 1], q)); part.push(q);
     }
-    const out = smoothPositions(part, this.stabilization);
+    const out = smoothLine(part, s, sigma, sigmaR, dc);
     // newly settled points move into the cache
-    for (let i = sm.points.length; i + REACH < acc.length; i++) {
+    const m = n - 3;
+    for (let i = f; i <= m && lens[m] - lens[i] > REACH; i++) {
       const q = out[i - start], prev = sm.points[i - 1];
       sm.lengths.push(prev ? sm.lengths[i - 1] + dist(prev, q) : 0);
       sm.points.push(q);
@@ -120,11 +175,9 @@ export class PenInput {
     const points = sm.points.concat(out.slice(sm.points.length - start));
     const lengths = sm.lengths.slice();
     for (let i = lengths.length; i < points.length; i++) lengths.push(i ? lengths[i - 1] + dist(points[i - 1], points[i]) : 0);
-    // Filtering needs future neighbours. Keep all affected samples on the replaceable
-    // overlay so the permanent prefix is identical before and after the next input/lift.
-    const lookahead = passes + K + 2;
-    const fixedCount = Math.max(1, Math.min(acc.length, points.length) - lookahead);
-    return { points, lengths, total: lengths[lengths.length - 1], fixedCount };
+    // Only settled points may be painted permanently; the rest stays on the replaceable overlay,
+    // so the permanent prefix is identical before and after the next input / the lift.
+    return { points, lengths, total: lengths[lengths.length - 1], fixedCount: Math.max(1, sm.points.length) };
   }
 
   finish() {

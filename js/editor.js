@@ -14,6 +14,7 @@ import { ensureLocal } from './offload.js';
 // Page canvases only need to look fine while scrolling; the detail layer provides sharpness.
 // Keeping them smaller saves iPad memory and makes each re-render faster.
 const MAX_CANVAS_PX = 6e6;
+const MAX_ZOOM = 10;
 
 // ---------- Tool configuration (per device) ----------
 const DEFAULT_TOOLS = {
@@ -165,7 +166,7 @@ function restoreView(tab, page) {
   ed.zoom = v.zoom; applyZoom(); updateZoomLabel();
   sc.scrollTop = v.top; sc.scrollLeft = v.left;
   if (page != null) scrollToPage(page);
-  hideDetails();
+  refreshDetails(true);
   updateCurrent();
 }
 
@@ -322,41 +323,56 @@ function paintAppended(el, added) {
     for (const e of added) drawStroke(ctx, e);
   };
   paint(c, c._xf);
+  // The detail layer maps page units to its pixels independently of scroll and zoom (it is
+  // placed in % of the page), so it can always take the new strokes while it shows content.
   const det = el._detail;
-  if (det && !det.hidden && det._xf?.token === el._detailToken && det._xf.box === box) paint(det, det._xf);
+  if (det && !det.hidden && det._xf?.box === box) paint(det, det._xf);
   return true;
 }
 
 // ---------- Sharp detail layer ----------
 // The page canvas above has a capped resolution (memory), so it gets soft when zoomed in.
-// On top of it, each visible page gets a "detail" canvas covering only its on-screen part,
-// rendered at exact device resolution — sharp at any zoom, like Goodnotes. While scrolling or
-// zooming the detail is hidden (the page canvas shows) and redrawn once movement stops.
+// On top of it, each visible page gets a "detail" canvas covering its on-screen part plus a
+// margin, rendered at exact device resolution — sharp at any zoom, like Goodnotes. It is placed
+// in % of the page, so it moves and scales with the page: while scrolling or pinching it stays
+// in place (sharp for short scrolls, scaled while zooming) and is redrawn once movement stops.
 const hideIdFor = page => ed.editing?.page === page ? ed.editing.id : null;
+const DETAIL_MARGIN = 0.2; // of the viewport, on every side
+const DETAIL_MAX_PX = 12e6; // device pixels per page (≈48 MB) — iPad Safari limits canvas memory
 async function renderDetail(el) {
   const det = el._detail;
   if (!det || !visible.has(el)) return;
   const token = el._detailToken = (el._detailToken || 0) + 1;
-  const r = el.getBoundingClientRect(), s = sc.getBoundingClientRect();
-  const x0 = Math.max(r.left, s.left), y0 = Math.max(r.top, s.top), x1 = Math.min(r.right, s.right), y1 = Math.min(r.bottom, s.bottom);
+  const r = el.getBoundingClientRect(), s = sc.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  let m = DETAIL_MARGIN, x0, y0, x1, y1;
+  for (;;) {
+    x0 = Math.max(r.left, s.left - s.width * m); y0 = Math.max(r.top, s.top - s.height * m);
+    x1 = Math.min(r.right, s.right + s.width * m); y1 = Math.min(r.bottom, s.bottom + s.height * m);
+    if (m === 0 || (x1 - x0) * (y1 - y0) * dpr * dpr <= DETAIL_MAX_PX) break;
+    m = m > 0.02 ? m / 2 : 0;
+  }
   if (x1 <= x0 || y1 <= y0 || !r.width) { det.hidden = true; return; }
-  const dpr = window.devicePixelRatio || 1, k = r.width / pageW(el._page) * dpr;
+  const k = r.width / pageW(el._page) * dpr;
   const off = document.createElement('canvas');
   off.width = Math.round((x1 - x0) * dpr); off.height = Math.round((y1 - y0) * dpr);
   await renderPage(off.getContext('2d'), el._page, k, hideIdFor(el._page), -(x0 - r.left) * dpr, -(y0 - r.top) * dpr);
   if (token !== el._detailToken) return; // superseded, or scrolled/zoomed meanwhile
   det.width = off.width; det.height = off.height;
   det.getContext('2d').drawImage(off, 0, 0);
-  det._xf = { scale: k, ox: -(x0 - r.left) * dpr, oy: -(y0 - r.top) * dpr, token, box: pageBox(el._page) };
-  Object.assign(det.style, { left: x0 - r.left + 'px', top: y0 - r.top + 'px', width: x1 - x0 + 'px', height: y1 - y0 + 'px' });
+  det._xf = { scale: k, ox: -(x0 - r.left) * dpr, oy: -(y0 - r.top) * dpr, box: pageBox(el._page) };
+  const pct = v => v * 100 + '%';
+  Object.assign(det.style, { left: pct((x0 - r.left) / r.width), top: pct((y0 - r.top) / r.height), width: pct((x1 - x0) / r.width), height: pct((y1 - y0) / r.height) });
   det.hidden = false;
 }
 let detailT;
-function hideDetails() {
+// After scrolling or zooming: redraw the detail layers once movement stops. They stay visible
+// meanwhile (hide = true only when they may show something else, e.g. another view of the tab).
+// schedule = false when a full re-render (which includes the details) follows anyway.
+function refreshDetails(hide = false, schedule = true) {
   // Bumping the token also discards any detail render still in flight.
-  ed.pageEls.forEach(el => { if (el._detail) { el._detail.hidden = true; el._detailToken = (el._detailToken || 0) + 1; } });
+  ed.pageEls.forEach(el => { if (el._detail) { if (hide) el._detail.hidden = true; el._detailToken = (el._detailToken || 0) + 1; } });
   clearTimeout(detailT);
-  detailT = setTimeout(() => visible.forEach(renderDetail), 140);
+  if (schedule) detailT = setTimeout(() => visible.forEach(renderDetail), 140);
 }
 export const elForPage = page => ed.pageEls.find(el => el._page === page);
 export function refreshPage(page, added = null) {
@@ -374,7 +390,9 @@ function applyZoom() { $('#pages').style.setProperty('--pw', Math.round(baseWidt
 let zoomT;
 const updateZoomLabel = () => { $('#zoomLabel').textContent = Math.round(ed.zoom * 100) + ' %'; };
 export function setZoom(z, cx, cy) {
-  z = clamp(z, ed.doc?.pages.some(p => p.inf) ? 0.2 : 0.5, 4); // infinite pages can be zoomed out further
+  // infinite pages can be zoomed out further; up to 1000 % for fine detail (the detail layer
+  // renders only the visible part, so a high zoom costs no extra memory)
+  z = clamp(z, ed.doc?.pages.some(p => p.inf) ? 0.2 : 0.5, MAX_ZOOM);
   if (Math.abs(z - ed.zoom) < 0.001) return;
   const r = sc.getBoundingClientRect();
   cx ??= r.left + r.width / 2; cy ??= r.top + r.height / 2;
@@ -384,8 +402,8 @@ export function setZoom(z, cx, cy) {
   sc.scrollLeft = ox * k - (cx - r.left);
   sc.scrollTop = oy * k - (cy - r.top);
   updateZoomLabel();
-  hideDetails();
-  clearTimeout(zoomT); zoomT = setTimeout(() => { rerenderVisible(); renderSelection(); }, 200);
+  refreshDetails(false, false);
+  clearTimeout(zoomT); zoomT = setTimeout(() => { zoomT = null; rerenderVisible(); renderSelection(); }, 160);
   repositionText();
 }
 
@@ -450,7 +468,8 @@ function updateCurrent() {
   updateBookmarkBtn();
   $('#pageInd').textContent = `${ed.cur + 1} von ${ed.doc.pages.length}`;
 }
-sc.addEventListener('scroll', () => { updateCurrent(); repositionText(); hideDetails(); });
+// (while a zoom's re-render is pending, that re-render redraws the details anyway)
+sc.addEventListener('scroll', () => { updateCurrent(); repositionText(); refreshDetails(false, !zoomT); });
 
 let resizeT;
 window.addEventListener('resize', () => {
