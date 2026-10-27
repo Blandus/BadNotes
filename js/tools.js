@@ -5,7 +5,7 @@ import { settings } from './store.js';
 import { bbox, unionBox, transformEl, drawStroke, pageH, pageW, pageX0, pageY0, renderPage, renderElements, LINE_H, pieceWidth, toRadius, fontFamily } from './render.js';
 import {
   ed, T, sc, commit, renderEl, repaintArea, elForPage, setZoom, undo, redo, selectTool, renderOptions,
-  scrollToPage, currentPage, toggleSearch, PALETTE,
+  scrollToPage, currentPage, toggleSearch, PALETTE, saveTools,
 } from './editor.js';
 import { toast, popover, closePopover, menu } from './ui.js';
 import { samplePiece, addSamplesToPath, strokeSamples, tipRadius } from './ink.js';
@@ -293,6 +293,19 @@ function onMove(e) {
     let evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
     if (!evs.length) evs = [e];
     const d = drawing;
+    // Pencil diagnostics, raw as delivered, once the handler is done (no-op unless recording)
+    if (d.input) queueMicrotask(() => recMove(e, at));
+    // Safari on iPad delivers every Apple Pencil move twice (recorded: 51 % of all pointermove
+    // events repeat the previous one, coalesced samples and all). Taken as new input, the line
+    // ran back 12 ms and forward again — small kinks and knots in every stroke. Only samples
+    // newer than the last one taken count (same time and place = the same sample).
+    evs = evs.filter(ev => {
+      const t = ev.timeStamp, l = d.lastIn;
+      if (l && (t < l[0] || (t === l[0] && ev.clientX === l[1] && ev.clientY === l[2]))) return false;
+      d.lastIn = [t, ev.clientX, ev.clientY];
+      return true;
+    });
+    if (!evs.length) return;
     if (d.kind === 'stroke') {
       if (d.straight) d.stroke.points = [d.stroke.points[0], toPage(e, d.el, d.rect)];
       else if (!d.snapped) {
@@ -304,7 +317,6 @@ function onMove(e) {
         d.pred = d.input ? penPredictions(predictions, e.timeStamp, toPage(e, d.el, d.rect, true), ppu(d)) : predictions;
         if (d.input && !d.pred.length) d.pred = d.input.extrapolate(frameMs);
       }
-      if (d.input) recMove(e, at); // Pencil diagnostics (no-op unless recording)
       if (!d.snapped) { liveNow(); watchHold(d, e); }
       else if (d.snapped.pts.length === 2 && !d.snapped.closed) {
         // Snapped line: keep holding and move to place the end point.
@@ -577,6 +589,7 @@ function finish(ok) {
     else s = toRadius(s); // stored like Goodnotes: half width per point
     if (d.input && !snap) paintFinishedPen(d, s);
     if (d.input) recEnd(snap ? null : s);
+    if (d.input && !snap) learnPressure(d.input.usualPressure());
     if (snap) { clearInk(); if (live?.d === d) clearLive(); } // the snapped shape differs from the rough live stroke
     // Pen gestures: scribble over something to erase it
     if (!snap && s.tool === 'pen' && !d.shapes && T.pen.scribble && isScribble(s.points)) {
@@ -810,7 +823,7 @@ function startStroke(base, pt) {
   };
   if (ed.tool === 'pen') {
     // mouse / finger: pressure simulated from speed (a real pen reports its own)
-    drawing.input = new PenInput(stroke, pt, base.time, ppu(base), cfg.stab, !base.pen);
+    drawing.input = new PenInput(stroke, pt, base.time, ppu(base), cfg.stab, !base.pen, settings.penPressure || 0.25);
     stroke.points = drawing.input.points;
   }
   if (!pendingInk) clearInk();
@@ -925,15 +938,12 @@ function drawPenInk(d) {
 
 // Keep the complete finished tail visible during the asynchronous page render. Without
 // this handoff the tail would vanish for a frame when the tip layer is cleared.
+// The live area shows exactly the stored stroke from the lift on (its curve fit differs from the
+// live line by less than the fit tolerance, a fraction of a pixel).
 function paintFinishedPen(d, s) {
-  const p = s.points;
-  const tail = d.drawn === 1 ? [p[0]] : [[d.prevMid[0], d.prevMid[1], d.prevR]];
-  for (let i = d.drawn; i < p.length; i++) tail.push(p[i]);
-  const path = new Path2D(); addSamplesToPath(path, strokeSamples(tail, i => tail[i][2]));
-  const grown = ensureLive(d, liveBox(d, p));
-  liveTransform(lctx, d);
-  if (grown) drawStroke(lctx, s); // the area had to grow: paint the whole finished stroke
-  else { lctx.fillStyle = s.color; lctx.fill(path, 'nonzero'); }
+  ensureLive(d, liveBox(d, s.points));
+  lctx.setTransform(1, 0, 0, 1, 0, 0); lctx.clearRect(0, 0, liveInk.width, liveInk.height);
+  liveTransform(lctx, d); drawStroke(lctx, s);
   tctx.setTransform(1, 0, 0, 1, 0, 0); tctx.clearRect(0, 0, liveTip.width, liveTip.height);
 }
 
@@ -1490,4 +1500,15 @@ function onKey(e) {
   else if (k === 'escape') clearSelection();
   else if (k === 'pagedown' || k === 'arrowright') { handled(); scrollToPage(Math.min(ed.cur + 1, ed.doc.pages.length - 1)); }
   else if (k === 'pageup' || k === 'arrowleft') { handled(); scrollToPage(Math.max(ed.cur - 1, 0)); }
+}
+
+// The writer's usual Pencil pressure (median per stroke, averaged over strokes), so the pen width
+// setting means the width at the pressure this person actually writes with. Learns quickly over
+// the first strokes, then slowly; kept per device.
+function learnPressure(p) {
+  if (!p) return;
+  const n = settings.penPressureN || 0, a = n < 10 ? 0.3 : 0.08;
+  settings.penPressure = Math.round(((settings.penPressure || 0.25) * (1 - a) + p * a) * 1000) / 1000;
+  settings.penPressureN = n + 1;
+  saveTools();
 }

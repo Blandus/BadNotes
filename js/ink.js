@@ -17,13 +17,17 @@ export const WIDTH_FN = {
 // pressure matters; s.sharp (0..1) makes fountain/brush strokes direction-dependent like an
 // angled nib (thin when moving along the 45° nib, full width across it).
 const NIB = Math.PI / 4;
-export function pieceWidth(s, pressure, dx = 0, dy = 0) {
+// pref: the writer's usual pressure (learned while writing, see tools.js), so the chosen width is
+// the width at that pressure — whether someone writes as lightly as 0.15 or presses with 0.5.
+export function pieceWidth(s, pressure, dx = 0, dy = 0, pref = 0.5) {
   if (s.ink === 2) {
     if (s.pen === 'ball') return s.width;
-    const p = Math.max(0, Math.min(1, pressure)), sensitivity = Math.max(0, Math.min(1, s.press ?? 0.5));
-    // Nominal width at medium pressure. Tip sharpness is a taper, not a fixed 45-degree nib.
-    const amount = s.pen === 'brush' ? 2.6 : 1.6;
-    return s.width * Math.max(0.12, 1 + amount * sensitivity * (Math.pow(p, 0.75) - Math.pow(0.5, 0.75)));
+    // Width ∝ (pressure / usual pressure)^γ with γ = sensitivity (brush: stronger). Measured on the
+    // same sentence written in Goodnotes: its width follows pressure about as √ (γ ≈ 0.5); the
+    // earlier curve, centred on 0.5, was nearly flat for a light hand (×1.10 instead of ×1.26
+    // between the lighter downstrokes and the firmer cross strokes). Tip sharpness is a taper.
+    const g = Math.max(0, Math.min(1, s.press ?? 0.5)) * (s.pen === 'brush' ? 2.2 : INK.gamma);
+    return s.width * Math.max(0.2, Math.min(2.2, Math.pow(Math.max(0.01, Math.min(1, pressure)) / pref, g)));
   }
   const f = WIDTH_FN[s.pen] || WIDTH_FN.fountain, mid = f(0.5);
   const k = (s.press ?? 0.5) / 0.5;
@@ -34,10 +38,14 @@ export function pieceWidth(s, pressure, dx = 0, dy = 0) {
 
 // Taper over distance, not sample count. A short dot retains its pressure-defined size.
 // Used for both the live tail and committed new ink; old/imported strokes keep their look.
+// taper: how far a pen tip narrows at the stroke ends (× sharpness); gamma: pressure exponent at
+// full sensitivity (default sensitivity 0.5 → 0.7, close to Goodnotes on the recorded sentence)
+export const INK = { taper: 0.3, gamma: 1.4 };
 export function tipRadius(s, radius, distance, total) {
   if (s.pen === 'ball' || !s.sharp || total < s.width * 0.75) return radius;
   const sharp = Math.max(0, Math.min(1, s.sharp));
-  const length = s.width * (0.5 + 2 * sharp), floor = 1 - 0.78 * sharp;
+  // gentler since v61: the pressure already thins a stroke's start (Goodnotes: ends at 70–77 % width)
+  const length = s.width * (0.5 + 2 * sharp), floor = 1 - INK.taper * sharp;
   const ease = x => { const t = Math.max(0, Math.min(1, x)); return t * t * (3 - 2 * t); };
   const start = floor + (1 - floor) * ease(distance / length);
   const end = floor + (1 - floor) * ease((total - distance) / length);

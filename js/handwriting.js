@@ -19,15 +19,21 @@ const rp = v => Math.round(v * 100) / 100;
 // than ~3 px is removed, while the shape of letters is kept almost exactly (the shrinking of a
 // plain average cancels to second order). Corners and both ends keep their position; the
 // average never reaches across them.
-// Corners: the direction over CORNER px before and after a point turns by more than 60°; of
+// Corners: the direction over SMOOTH.corner px before and after a point turns by more than
+// SMOOTH.cornerDeg (3 px, 75° since v61: 2 px / 60° still took slow, shaky bits for corners); of
 // the points around one corner only the sharpest is kept (the tip of a v, z, k). Measuring over
 // a distance, not over 3 samples (as before v55), keeps sensor noise of slow strokes — samples
 // ~0.4 px apart — from being taken for corners and left unsmoothed.
-// Radii (pressure): plain Gaussian along the arc length (σ 10 px), so the width swells and thins
-// calmly: the hand's pressure flutters at 5–10 Hz, which made both edges bulge every 10–20 px.
-// px: centre line (stabilisation raises it up to 4×), width, corner test, point spacing, end hooks
-export const SMOOTH = { sigma: 1.4, sigmaR: 10, corner: 2, step: 0.4, hook: 3 };
+// Radii (pressure): plain Gaussian along the arc length (σ 6 px): the hand's pressure flutter at
+// 5–10 Hz (both edges bulging every 10–20 px) is evened out, while a stroke still gets thinner
+// and fuller with the pressure, as the same sentence written in Goodnotes shows.
+// px: centre line (stabilisation raises it up to 4×), width, corner test, point spacing, end hooks,
+// curve-fit tolerance of the stored stroke (0 keeps every point); fitR: its radius tolerance (share);
+// start: how far a stroke's first pressure is raised towards the usual one (the Pencil reports
+// ~0.08 for its first few samples, which made starts thinner than in Goodnotes)
+export const SMOOTH = { sigma: 1.4, sigmaR: 6, corner: 3, cornerDeg: 75, step: 0.4, hook: 5, fit: 0.4, fitR: 0.15, start: 0.5 };
 function cornersOf(p, s, dc) {
+  const cosMax = Math.cos(SMOOTH.cornerDeg * Math.PI / 180);
   const n = p.length, cos = new Float64Array(n).fill(1);
   for (let i = 1, a = 0, b = 1; i < n - 1; i++) {
     while (a + 1 < i && s[i] - s[a + 1] >= dc) a++; // last point at least dc before i
@@ -41,7 +47,7 @@ function cornersOf(p, s, dc) {
   // keep a candidate only where it is the sharpest within dc on both sides (ties: the first)
   const corner = new Uint8Array(n);
   for (let i = 1; i < n - 1; i++) {
-    if (cos[i] >= 0.5) continue;
+    if (cos[i] >= cosMax) continue;
     let best = true;
     for (let j = i - 1; best && j > 0 && s[i] - s[j] <= dc; j--) if (cos[j] <= cos[i]) best = false;
     for (let j = i + 1; best && j < n - 1 && s[j] - s[i] <= dc; j++) if (cos[j] < cos[i]) best = false;
@@ -73,14 +79,80 @@ function smoothLine(points, s, sigma, sigmaR, dc) {
   return points.map((_, i) => [rp(x[i]), rp(y[i]), r[i]]);
 }
 
+// ---------- Curve fit of a finished stroke ----------
+// Goodnotes stores a written stroke as a few smooth curve pieces (the same sentence: 9 points per
+// stroke, ~1.9 page units apart), Folio stored every accepted sample (63 per stroke, 0.5 apart),
+// so the slightest unsteadiness stayed in the line. The finished centre line is reduced to key
+// points (Douglas–Peucker: centre within tol, radius within 4 %), and the control points are
+// solved so that Folio's curve (quadratic pieces between control-point midpoints, ink.js) runs
+// through every key point — fewer points, the same shape within tol.
+function keyPoints(p, tol) {
+  const n = p.length, keep = new Uint8Array(n); keep[0] = keep[n - 1] = 1;
+  const stack = [[0, n - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    if (b - a < 2) continue;
+    const [ax, ay, ar] = p[a], [bx, by, br] = p[b], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+    let worst = 1, wi = -1;
+    for (let i = a + 1; i < b; i++) {
+      const t = l2 ? Math.max(0, Math.min(1, ((p[i][0] - ax) * dx + (p[i][1] - ay) * dy) / l2)) : 0;
+      const e = Math.max(Math.hypot(p[i][0] - ax - t * dx, p[i][1] - ay - t * dy) / tol, Math.abs(p[i][2] - ar - t * (br - ar)) / Math.max(0.03, SMOOTH.fitR * p[i][2]));
+      if (e > worst) { worst = e; wi = i; }
+    }
+    if (wi >= 0) { keep[wi] = 1; stack.push([a, wi], [wi, b]); }
+  }
+  return p.filter((_, i) => keep[i]);
+}
+// Control points C (C0 = first, Cm = last key point) such that the middle of every curved piece
+// equals the next key point: piece i → (C_{i-1} + 6 C_i + C_{i+1}) / 8, the first one
+// 0.25 C0 + 0.625 C1 + 0.125 C2 at the start of a stroke; a tridiagonal system, solved per
+// coordinate (Thomas algorithm). Radii are taken from the keys.
+// A stroke is fitted piece by piece between its corners, and every corner becomes a doubled
+// control point: Folio's curve then runs straight into it and out of it — the tip of a v or z
+// stays sharp (one smooth fit across it rounded tips off by ~3 page units). After a corner the
+// first curved piece starts at the middle of C0–C1, so its row is (C0 + 6 C1 + C2) / 8 as well.
+function fitPiece(points, tol, afterCorner) {
+  const K = keyPoints(points, tol), m = K.length - 1;
+  if (m < 2) return K;
+  const n = m - 1, b0 = afterCorner ? 0.75 : 0.625, a0 = afterCorner ? 0.125 : 0.25;
+  const solve = c => {
+    const a = new Float64Array(n), b = new Float64Array(n), cc = new Float64Array(n), d = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      a[i] = i === 0 ? 0 : 0.125; b[i] = i === 0 ? b0 : 0.75; cc[i] = i === n - 1 ? 0 : 0.125;
+      d[i] = K[i + 1][c] - (i === 0 ? a0 * K[0][c] : 0) - (i === n - 1 ? 0.125 * K[m][c] : 0);
+    }
+    for (let i = 1; i < n; i++) { const w = a[i] / b[i - 1]; b[i] -= w * cc[i - 1]; d[i] -= w * d[i - 1]; }
+    const x = new Float64Array(n); x[n - 1] = d[n - 1] / b[n - 1];
+    for (let i = n - 2; i >= 0; i--) x[i] = (d[i] - cc[i] * x[i + 1]) / b[i];
+    return x;
+  };
+  const X = solve(0), Y = solve(1);
+  return [K[0], ...K.slice(1, m).map((k, i) => [rp(X[i]), rp(Y[i]), k[2]]), K[m]];
+}
+// corner: flags per point (cornersOf)
+export function fitCurve(points, tol, corner) {
+  if (points.length < 4) return points;
+  let out = [], s = 0;
+  for (let i = 1; i < points.length; i++) {
+    if (i < points.length - 1 && !corner?.[i]) continue;
+    const part = fitPiece(points.slice(s, i + 1), tol, s > 0);
+    out = out.length ? out.concat(part) : part; // the corner point is in both: doubled
+    s = i;
+  }
+  return out;
+}
+
 // Mouse and finger report no pressure (always 0.5). Their pressure is simulated from the
 // speed on screen, like ink: a slow line gets a little heavier, a fast flick thinner.
 // px/ms → pressure; 1 px/ms (an ordinary handwriting speed) gives the nominal 0.5.
 const simulatedPressure = speed => clamp(0.62 - 0.12 * speed, 0.3, 0.68);
 
 export class PenInput {
-  constructor(stroke, point, time, scale, stabilization = 0, simulate = false) {
+  // pref: the writer's usual pen pressure (pieceWidth); simulated pressure is centred on 0.5
+  constructor(stroke, point, time, scale, stabilization = 0, simulate = false, pref = 0.5) {
     this.simulate = simulate;
+    this.pref = simulate ? 0.5 : clamp(pref, 0.05, 0.9);
+    this.pressures = []; // real pen pressures of this stroke (to learn the usual pressure)
     this.speed = 0.5; // smoothed screen speed (px/ms) for simulated pressure
     if (simulate) point = [point[0], point[1], simulatedPressure(this.speed)];
     this.stroke = stroke;
@@ -91,12 +163,19 @@ export class PenInput {
     this.dt = 1 / 120;
     this.raw = point.slice();
     // The Pencil's first contact sample often carries a pressure spike; starting the pressure
-    // filter there made a knob at the start of many strokes. Start at most at medium pressure
+    // filter there made a knob at the start of many strokes. Start at most at the usual pressure
     // and let the filter follow the real pressure from there.
-    this.filtered = [point[0], point[1], Math.min(point[2], 0.5)];
-    this.dotRadius = pieceWidth(stroke, this.filtered[2]) / 2;
+    this.filtered = [point[0], point[1], Math.min(point[2] + (this.pref - point[2]) * SMOOTH.start, this.pref)];
+    this.dotRadius = this.radiusAt(this.filtered[2]);
     this.points = [[rp(point[0]), rp(point[1]), this.dotRadius]];
     this.lens = [0]; // arc length of this.points
+  }
+
+  radiusAt(p) { return pieceWidth(this.stroke, p, 0, 0, this.pref) / 2; }
+  // median pressure of the stroke (null for mouse/finger or very short strokes)
+  usualPressure() {
+    const p = this.pressures; if (p.length < 8) return null;
+    const s = [...p].sort((a, b) => a - b); return s[s.length >> 1];
   }
 
   push(point, time) {
@@ -123,7 +202,8 @@ export class PenInput {
     const h = this.hist || (this.hist = []);
     h.push([point[0], point[1], this.time]);
     if (h.length > 12) h.shift();
-    const radius = pieceWidth(this.stroke, next[2]) / 2;
+    const radius = this.radiusAt(next[2]);
+    if (!this.simulate && point[2] > 0) this.pressures.push(point[2]);
     this.dotRadius = Math.max(this.dotRadius, radius);
     // Samples closer than SMOOTH.step to the last point are averaged, not dropped: a slow stroke
     // gives several samples per point, and their mean is steadier than any single one.
@@ -171,14 +251,14 @@ export class PenInput {
   // enough back that the result is exactly that of smoothing the whole stroke. The cost per
   // frame stays constant however long the stroke gets (long lines on infinite pages).
   // Hooks: the Pencil often slides a little when it touches down or lifts off, which left a
-  // small comma or knob at a stroke's ends (Goodnotes shows none). A sharp turn (> 72°) within
+  // small comma or knob at a stroke's ends (Goodnotes shows none). A sharp turn (> 60°) within
   // the first / last HOOK px is cut off. The start is decided once 2 × HOOK px are written —
   // long before anything is painted permanently — the end when the stroke is finished.
   dehook(atEnd) {
     const acc = this.points, lens = this.lens, n = acc.length, D = SMOOTH.hook / this.scale, total = lens[n - 1];
     if (total < 4 * D) return;
     const pos = k => atEnd ? acc[n - 1 - k] : acc[k], len = k => atEnd ? total - lens[n - 1 - k] : lens[k];
-    let cut = 0, sharpest = 0.3; // cos: turns sharper than ~72°
+    let cut = 0, sharpest = 0.5; // cos: turns sharper than 60°
     for (let i = 1, j = 2; i < n - 1 && len(i) <= D; i++) {
       if (j <= i) j = i + 1;
       while (j < n - 1 && len(j) - len(i) < D) j++;
@@ -216,7 +296,7 @@ export class PenInput {
     const start = sm.start;
     const part = acc.slice(start), s = lens.slice(start);
     if (dist(acc[n - 1], this.raw) > SMOOTH.step / this.scale) {
-      const q = [rp(this.raw[0]), rp(this.raw[1]), pieceWidth(this.stroke, this.filtered[2]) / 2];
+      const q = [rp(this.raw[0]), rp(this.raw[1]), this.radiusAt(this.filtered[2])];
       s.push(s[s.length - 1] + dist(acc[n - 1], q)); part.push(q);
     }
     const out = smoothLine(part, s, sigma, sigmaR, dc);
@@ -242,7 +322,9 @@ export class PenInput {
     if (view.total * this.scale < 0.35) {
       return [[this.points[0][0], this.points[0][1], round(this.dotRadius)]];
     }
-    return view.points.map((p, i) => [p[0], p[1], round(tipRadius(this.stroke, p[2], view.lengths[i], view.total))]);
+    const pts = view.points.map((p, i) => [p[0], p[1], round(tipRadius(this.stroke, p[2], view.lengths[i], view.total))]);
+    if (!SMOOTH.fit) return pts;
+    return fitCurve(pts, SMOOTH.fit / this.scale, cornersOf(pts, view.lengths, SMOOTH.corner / this.scale));
   }
 }
 
