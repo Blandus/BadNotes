@@ -17,10 +17,20 @@ const r2 = v => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
 const r4 = v => (Number.isFinite(v) ? Math.round(v * 1e4) / 1e4 : null);
 const sample = e => [r2(e.timeStamp), r2(e.clientX), r2(e.clientY), r4(e.pressure), e.pointerType || '', r2(e.tiltX), r2(e.tiltY), r4(e.altitudeAngle), r4(e.azimuthAngle)];
 
+// Frame times for ms milliseconds while nothing is drawn: shows whether the system itself limits
+// the frame rate (e.g. 30 fps in Low Power Mode) or only drawing is slow.
+const idleFrames = (ms = 1000) => new Promise(res => {
+  const t = [];
+  const loop = now => { t.push(now); if (now - t[0] < ms) requestAnimationFrame(loop); else res(t.slice(1).map((v, i) => r2(v - t[i]))); };
+  requestAnimationFrame(loop);
+});
+const fps = gaps => { const s = gaps.filter(v => v > 0).sort((a, b) => a - b); return s.length ? Math.round(1000 / s[s.length >> 1]) : null; };
+
 export function setRecording(on) {
   rec.on = on;
   if (on) {
-    rec.strokes = []; rec.started = Date.now();
+    rec.strokes = []; rec.started = Date.now(); rec.idle = null; rec.idleAfter = null; rec.lastFps = null;
+    setTimeout(() => idleFrames().then(g => { rec.idle = g; update(); }), 300);
     badge ||= h('div', { class: 'rec-badge' },
       h('span', { class: 'rec-dot' }), h('span', { class: 'rec-count' }),
       h('button', { onclick: save }, 'Sichern'),
@@ -32,7 +42,12 @@ export function setRecording(on) {
     badge?.remove();
   }
 }
-const update = () => { if (badge) badge.querySelector('.rec-count').textContent = `Pencil-Aufzeichnung · ${rec.strokes.length} ${rec.strokes.length === 1 ? 'Strich' : 'Striche'}`; };
+const update = () => {
+  if (!badge) return;
+  const n = rec.strokes.length, idle = rec.idle ? fps(rec.idle) : null;
+  badge.querySelector('.rec-count').textContent = `Pencil-Aufzeichnung · ${n} ${n === 1 ? 'Strich' : 'Striche'}`
+    + (idle ? ` · Ruhe ${idle} fps` : '') + (rec.lastFps ? ` · Schreiben ${rec.lastFps} fps` : '');
+};
 
 // d: the drawing state of a new pen stroke (tools.js), e: its pointerdown
 export function recBegin(d, e, info) {
@@ -60,13 +75,21 @@ export function recUp(e) { if (cur) cur.up = sample(e); }
 export function recEnd(s) {
   if (!cur) return;
   cur.stored = s ? { points: s.points, ink: s.ink, rad: s.rad, shape: !!s.shape } : null;
-  rec.strokes.push(cur); cur = null;
+  rec.strokes.push(cur);
+  const f = cur.frames.slice(1).map((v, i) => v - cur.frames[i]);
+  if (f.length >= 3) rec.lastFps = fps(f);
+  cur = null;
   update();
+  // idle frame rate once the hand rests (measured again after a pause in writing)
+  clearTimeout(rec.idleT);
+  rec.idleT = setTimeout(() => { if (!cur && rec.on) idleFrames(600).then(g => { if (!cur) { rec.idleAfter = g; rec.idle = g; update(); } }); }, 1500);
 }
 
 async function save() {
   if (!rec.strokes.length) return toast('Noch keine Striche aufgezeichnet');
+  // (no await before sharing: the share sheet needs the tap's user activation)
   const data = {
+    idleFrameMs: { start: rec.idle, afterStrokes: rec.idleAfter || null },
     folio: APP_VERSION, recorded: new Date(rec.started).toISOString(), userAgent: navigator.userAgent,
     dpr: window.devicePixelRatio, screen: [screen.width, screen.height], viewport: [innerWidth, innerHeight],
     standalone: matchMedia('(display-mode: standalone)').matches,

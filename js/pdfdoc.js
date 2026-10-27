@@ -140,6 +140,7 @@ async function renderNow(page, W, H, scale, ox, oy) {
 
 // Draws the PDF page behind page's content into ctx (whose transform maps page units → pixels:
 // scale, offset ox/oy in pixels). Returns false if the file is not available (offline).
+let lastCut = null;
 export async function drawPdfPage(ctx, page, scale, ox = 0, oy = 0) {
   const W = ctx.canvas.width, H = ctx.canvas.height;
   const whole = !ox && !oy; // full page (page canvases, thumbnails): cached; zoomed-in parts are not
@@ -156,7 +157,14 @@ export async function drawPdfPage(ctx, page, scale, ox = 0, oy = 0) {
           () => { if (rendered.get(key) === v) rendered.delete(key); });
       }
       c = v.c || await v.p;
-    } else c = await renderInto(page, W, H, scale, ox, oy);
+    } else {
+      // the latest cut-out (a page's sharp detail layer) is kept, so redrawing parts of it
+      // (erasing) doesn't render the PDF again each time
+      const k = `${page.pdf.file}|${page.pdf.n}|${W}x${H}|${scale}|${ox}|${oy}`;
+      if (lastCut?.key !== k) lastCut = { key: k, p: renderInto(page, W, H, scale, ox, oy) };
+      const cut = lastCut;
+      try { c = await cut.p; } catch (err) { if (lastCut === cut) lastCut = null; throw err; }
+    }
   } catch { return false; }
   ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(c, 0, 0); ctx.restore();
   return true;

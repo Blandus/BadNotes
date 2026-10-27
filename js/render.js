@@ -180,12 +180,18 @@ const drawText = (ctx, t) => drawRich(ctx, t, measure);
 
 // ---------- Pages ----------
 // ox/oy shift the output (in canvas pixels) so a cut-out of the page can be rendered.
-export async function renderPage(ctx, page, scale, hideId, ox = 0, oy = 0) {
+// hide: an element id or a Set of ids not to draw. clip: { x, y, w, h } in page units — only that
+// area is redrawn (on top of what the canvas shows), and only the elements reaching into it.
+export async function renderPage(ctx, page, scale, hide, ox = 0, oy = 0, clip = null) {
   if (page.inf) { ox -= pageX0(page) * scale; oy -= pageY0(page) * scale; }
-  const srcs = [page.bg, ...page.elements.filter(e => e.type === 'image').map(e => e.src)].filter(Boolean);
+  const hidden = e => hide != null && (hide === e.id || hide.has?.(e.id));
+  const meets = e => { const b = bbox(e); return b.x < clip.x + clip.w && b.x + b.w > clip.x && b.y < clip.y + clip.h && b.y + b.h > clip.y; };
+  const els = page.elements.filter(e => !hidden(e) && (!clip || meets(e)));
+  const srcs = [page.bg, ...els.filter(e => e.type === 'image').map(e => e.src)].filter(Boolean);
   const imgs = new Map(await Promise.all(srcs.map(async s => [s, await loadImage(s)])));
   const h = pageH(page);
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  if (clip) { ctx.save(); ctx.beginPath(); ctx.rect(clip.x, clip.y, clip.w, clip.h); ctx.clip(); }
   ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
   ctx.fillStyle = paperColor(page); ctx.fillRect(pageX0(page), pageY0(page), pageW(page), h);
   if (page.bg && imgs.get(page.bg)) ctx.drawImage(imgs.get(page.bg), 0, 0, PAGE_W, h);
@@ -202,12 +208,22 @@ export async function renderPage(ctx, page, scale, hideId, ox = 0, oy = 0) {
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
   if (page.inf) drawInfiniteTemplate(ctx, page);
   else drawTemplate(ctx, page.template, h, page.paper === 'dark');
-  for (const e of page.elements) {
-    if (e.id === hideId) continue;
+  drawElements(ctx, els, imgs);
+  if (clip) ctx.restore();
+}
+function drawElements(ctx, els, imgs) {
+  for (const e of els) {
     if (e.type === 'stroke') drawStroke(ctx, e);
     else if (e.type === 'text') drawText(ctx, e);
     else if (e.type === 'image' && imgs.get(e.src)) ctx.drawImage(imgs.get(e.src), e.x, e.y, e.w, e.h);
   }
+}
+// Only the given elements, on a transparent canvas (a lifted selection while it is dragged).
+export async function renderElements(ctx, els, scale, ox, oy) {
+  const srcs = els.filter(e => e.type === 'image').map(e => e.src);
+  const imgs = new Map(await Promise.all(srcs.map(async s => [s, await loadImage(s)])));
+  ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  drawElements(ctx, els, imgs);
 }
 
 export async function renderThumb(canvas, page, width) {

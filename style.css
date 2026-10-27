@@ -687,6 +687,9 @@ svg { display: block; flex: none; }
 .page-bm { position: absolute; top: -3px; right: 22px; color: var(--sage); pointer-events: none; }
 #overlay, #ink { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 3; }
 #ink { z-index: 2; }
+/* live pen stroke: small canvases over the area of the stroke being written (tools.js) */
+canvas.live { position: absolute; pointer-events: none; z-index: 2; }
+canvas.live-tip { z-index: 3; }
 #editor[data-tool="pen"] #scroller, #editor[data-tool="highlighter"] #scroller, #editor[data-tool="shapes"] #scroller, #editor[data-tool="lasso"] #scroller { cursor: crosshair; }
 #editor[data-tool="eraser"] #scroller, #editor[data-tool="laser"] #scroller { cursor: none; }
 #editor[data-tool="text"] #scroller { cursor: text; }
@@ -707,6 +710,8 @@ svg { display: block; flex: none; }
 
 /* Lasso selection */
 .selbox { position: absolute; border: 1.5px dashed var(--accent); border-radius: 6px; background: rgba(142, 184, 230, .08); cursor: move; }
+.selbox.dragging .sel-menu { display: none; }
+.sel-lift { position: absolute; pointer-events: none; z-index: 1; will-change: transform; }
 .sel-handle {
   position: absolute; right: -9px; bottom: -9px; width: 18px; height: 18px; border-radius: 50%;
   background: #fff; border: 2px solid var(--accent); cursor: nwse-resize; box-shadow: var(--shadow-sm);

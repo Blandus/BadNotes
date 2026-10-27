@@ -294,7 +294,7 @@ export async function renderEl(el) {
   const w = Math.round(pw * scale), hh = Math.round(ph * scale);
   // Draw offscreen, then swap in one go to avoid flicker.
   const off = document.createElement('canvas'); off.width = w; off.height = hh;
-  await renderPage(off.getContext('2d'), page, scale, ed.editing?.page === page ? ed.editing.id : null);
+  await renderPage(off.getContext('2d'), page, scale, hideIdFor(page));
   if (el._page !== page) return;
   if (c.width !== w || c.height !== hh) { c.width = w; c.height = hh; }
   const ctx = c.getContext('2d');
@@ -336,7 +336,8 @@ function paintAppended(el, added) {
 // margin, rendered at exact device resolution — sharp at any zoom, like Goodnotes. It is placed
 // in % of the page, so it moves and scales with the page: while scrolling or pinching it stays
 // in place (sharp for short scrolls, scaled while zooming) and is redrawn once movement stops.
-const hideIdFor = page => ed.editing?.page === page ? ed.editing.id : null;
+// not drawn on the page: the text box being edited, a selection lifted off the page while dragged (tools.js)
+const hideIdFor = page => ed.lift?.page === page ? ed.lift.ids : ed.editing?.page === page ? ed.editing.id : null;
 const DETAIL_MARGIN = 0.2; // of the viewport, on every side
 const DETAIL_MAX_PX = 12e6; // device pixels per page (≈48 MB) — iPad Safari limits canvas memory
 async function renderDetail(el) {
@@ -373,6 +374,25 @@ function refreshDetails(hide = false, schedule = true) {
   ed.pageEls.forEach(el => { if (el._detail) { if (hide) el._detail.hidden = true; el._detailToken = (el._detailToken || 0) + 1; } });
   clearTimeout(detailT);
   if (schedule) detailT = setTimeout(() => visible.forEach(renderDetail), 140);
+}
+// Redraws only an area of a page (page units) on its page canvas and sharp detail layer: much
+// cheaper than a full render (used while erasing). Repaints of a page run one after another, as
+// they draw onto the live canvases; areas requested meanwhile are merged into the next one.
+export function repaintArea(el, a) {
+  const c = el._canvas, box = pageBox(el._page);
+  if (!visible.has(el) || !c._xf || c._xf.box !== box || !c.width) return renderEl(el);
+  const d = el._dirty;
+  el._dirty = d ? { x: Math.min(d.x, a.x), y: Math.min(d.y, a.y), w: Math.max(d.x + d.w, a.x + a.w) - Math.min(d.x, a.x), h: Math.max(d.y + d.h, a.y + a.h) - Math.min(d.y, a.y) } : a;
+  el._repaint ||= (async () => {
+    while (el._dirty) {
+      const area = el._dirty, page = el._page, det = el._detail;
+      el._dirty = null;
+      await renderPage(c.getContext('2d'), page, c._xf.scale, hideIdFor(page), c._xf.ox, c._xf.oy, area);
+      if (det && !det.hidden && det.width && det._xf?.box === box) await renderPage(det.getContext('2d'), page, det._xf.scale, hideIdFor(page), det._xf.ox, det._xf.oy, area);
+    }
+    el._repaint = null;
+  })();
+  return el._repaint;
 }
 export const elForPage = page => ed.pageEls.find(el => el._page === page);
 export function refreshPage(page, added = null) {
@@ -459,14 +479,17 @@ function updateCurrent() {
   if (!ed.doc) return;
   const s = sc.getBoundingClientRect(), probe = s.top + s.height * 0.35;
   let best = 0, bestD = Infinity;
-  ed.pageEls.forEach((el, i) => {
-    const r = el.getBoundingClientRect();
+  // only pages near the viewport (runs on every scroll event; long documents have hundreds)
+  const near = visible.size ? ed.pageEls.filter(el => visible.has(el)) : ed.pageEls;
+  near.forEach(el => {
+    const i = ed.pageEls.indexOf(el), r = el.getBoundingClientRect();
     const d = probe < r.top ? r.top - probe : probe > r.bottom ? probe - r.bottom : 0;
     if (d < bestD) { bestD = d; best = i; }
   });
   if (best !== ed.cur) { ed.cur = best; highlightThumb(); updateTabLabels(); }
   updateBookmarkBtn();
-  $('#pageInd').textContent = `${ed.cur + 1} von ${ed.doc.pages.length}`;
+  const ind = `${ed.cur + 1} von ${ed.doc.pages.length}`, pi = $('#pageInd');
+  if (pi.textContent !== ind) pi.textContent = ind;
 }
 // (while a zoom's re-render is pending, that re-render redraws the details anyway)
 sc.addEventListener('scroll', () => { updateCurrent(); repositionText(); refreshDetails(false, !zoomT); });
@@ -715,6 +738,8 @@ function updateBookmarkBtn() {
   const b = $('#btnBookmark');
   if (!b || !ed.doc) return;
   const on = !!currentPage()?.bookmark;
+  if (b._on === on) return; // called on every scroll event: only touch the DOM on a change
+  b._on = on;
   b.replaceChildren(icon(on ? 'bookmarkFill' : 'bookmark', 24));
   b.classList.toggle('on', on);
 }

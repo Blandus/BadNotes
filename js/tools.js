@@ -2,12 +2,12 @@
 import { $, h, uid, r1, r2 } from './util.js';
 import { icon } from './icons.js';
 import { settings } from './store.js';
-import { bbox, unionBox, transformEl, drawStroke, pageH, pageW, pageX0, pageY0, renderPage, LINE_H, pieceWidth, toRadius, fontFamily } from './render.js';
+import { bbox, unionBox, transformEl, drawStroke, pageH, pageW, pageX0, pageY0, renderPage, renderElements, LINE_H, pieceWidth, toRadius, fontFamily } from './render.js';
 import {
-  ed, T, sc, commit, renderEl, elForPage, setZoom, undo, redo, selectTool, renderOptions,
+  ed, T, sc, commit, renderEl, repaintArea, elForPage, setZoom, undo, redo, selectTool, renderOptions,
   scrollToPage, currentPage, toggleSearch, PALETTE,
 } from './editor.js';
-import { toast, popover, closePopover } from './ui.js';
+import { toast, popover, closePopover, menu } from './ui.js';
 import { samplePiece, addSamplesToPath, strokeSamples, tipRadius } from './ink.js';
 import { PenInput, penPredictions } from './handwriting.js';
 import { recording, recBegin, recMove, recUp, recEnd } from './pencilrec.js';
@@ -27,17 +27,25 @@ export function initTools() {
   ink = $('#ink');
   ictx = ink.getContext('2d', { desynchronized: true });
   inkDesync = !!ictx.getContextAttributes?.().desynchronized;
+  initLive();
   const resize = () => { sizeOverlay(); sizeInk(); };
   resize();
   window.addEventListener('resize', resize);
   new ResizeObserver(resize).observe(overlay.parentElement);
   // Ink is in screen coordinates; a pending finished stroke would drift when scrolling.
-  sc.addEventListener('scroll', () => { if (pendingInk && !drawing) { pendingInk = 0; clearInk(); } });
+  sc.addEventListener('scroll', () => { if (pendingInk && !drawing) { pendingInk = 0; clearInk(); clearLive(); } });
   sc.addEventListener('pointerdown', onDown);
   sc.addEventListener('pointermove', onMove);
   sc.addEventListener('pointerup', e => onUp(e, true));
   sc.addEventListener('pointercancel', e => onUp(e, false));
   sc.addEventListener('pointerleave', () => { hoverCursor = null; drawOverlay(); });
+  // right click on a page: "Einsetzen" at that point (a finger long press does the same, see watchPress)
+  sc.addEventListener('contextmenu', e => {
+    const el = e.target.closest('.page');
+    if (!el || e.target.closest('.selbox, .text-editor') || e.pointerType === 'touch') return;
+    e.preventDefault();
+    pasteMenu(el, e.clientX, e.clientY);
+  });
   sc.addEventListener('wheel', e => {
     if (!e.ctrlKey) return;
     e.preventDefault();
@@ -239,6 +247,7 @@ function onDown(e) {
     if (drawing?.touch) cancelDrawing();
     try { sc.setPointerCapture(e.pointerId); } catch {}
     startGesture();
+    watchPress(e);
     return;
   }
   if (e.pointerType === 'pen') lastPen = performance.now();
@@ -295,8 +304,8 @@ function onMove(e) {
         d.pred = d.input ? penPredictions(predictions, e.timeStamp, toPage(e, d.el, d.rect, true), ppu(d)) : predictions;
         if (d.input && !d.pred.length) d.pred = d.input.extrapolate(frameMs);
       }
-      if (!d.snapped) { liveNow(); watchHold(d, e); }
       if (d.input) recMove(e, at); // Pencil diagnostics (no-op unless recording)
+      if (!d.snapped) { liveNow(); watchHold(d, e); }
       else if (d.snapped.pts.length === 2 && !d.snapped.closed) {
         // Snapped line: keep holding and move to place the end point.
         const p = toPage(e, d.el, d.rect);
@@ -326,6 +335,7 @@ function onMove(e) {
     }
     return;
   }
+  if (press?.id === e.pointerId && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) cancelPress();
   if (e.pointerType === 'touch' && touches.has(e.pointerId) && gesture) {
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (palmLikely()) { startGesture(); return; } // resting hand: don't move the page under the pen
@@ -342,6 +352,7 @@ function onMove(e) {
 let hoverCursor = null;
 
 function onUp(e, ok) {
+  if (press?.id === e.pointerId) cancelPress();
   const released = ok && touches.has(e.pointerId) && touches.size === 1 && !drawing ? gesture : null;
   if (e.pointerType === 'pen') lastPen = performance.now();
   // Safari cancels the pencil's pointer when it thinks the palm started a gesture; the ink
@@ -469,7 +480,7 @@ function watchHold(d, e) {
     if (!r) return;
     d.snapped = r;
     drawOverlay();
-    clearInk(); pendingInk = 0;
+    clearInk(); pendingInk = 0; if (live?.d === d) clearLive();
     inkTransform(d);
     drawStroke(ictx, toShape(d.stroke, r));
   }, 500);
@@ -547,8 +558,9 @@ function cancelDrawing() {
   const d = drawing; drawing = null; ed.busy = false;
   if (!d) return;
   clearTimeout(d.holdT);
-  if (d.kind === 'erase' || d.kind === 'move' || d.kind === 'resize' || d.kind === 'textwidth' || d.kind === 'vertex') { d.page.elements = d.before; renderEl(d.el); renderSelection(); renderShapeHandles(); }
-  else if (d.kind === 'stroke') { if (!pendingInk) clearInk(); if (d.input) recEnd(null); }
+  if (d.kind === 'move' || d.kind === 'resize') { d.page.elements = d.before; dropLift(d, null); }
+  else if (d.kind === 'erase' || d.kind === 'textwidth' || d.kind === 'vertex') { d.page.elements = d.before; renderEl(d.el); renderSelection(); renderShapeHandles(); }
+  else if (d.kind === 'stroke') { if (!pendingInk) clearInk(); if (live?.d === d) clearLive(); if (d.input) recEnd(null); }
   else renderEl(d.el);
   drawOverlay();
 }
@@ -565,7 +577,7 @@ function finish(ok) {
     else s = toRadius(s); // stored like Goodnotes: half width per point
     if (d.input && !snap) paintFinishedPen(d, s);
     if (d.input) recEnd(snap ? null : s);
-    if (snap) clearInk(); // the snapped shape differs from the rough live stroke
+    if (snap) { clearInk(); if (live?.d === d) clearLive(); } // the snapped shape differs from the rough live stroke
     // Pen gestures: scribble over something to erase it
     if (!snap && s.tool === 'pen' && !d.shapes && T.pen.scribble && isScribble(s.points)) {
       const victims = scribbleTargets(d.page, s);
@@ -583,7 +595,11 @@ function finish(ok) {
   } else if (d.kind === 'erase') {
     d.page.elements = d.before;
     if (d.work !== d.before) commit(d.page, d.work);
-  } else if (d.kind === 'move' || d.kind === 'resize' || d.kind === 'textwidth') {
+  } else if (d.kind === 'move' || d.kind === 'resize') {
+    const next = d.page.elements;
+    d.page.elements = d.before;
+    dropLift(d, next !== d.before ? next : null);
+  } else if (d.kind === 'textwidth') {
     const next = d.page.elements;
     d.page.elements = d.before;
     if (next !== d.before) commit(d.page, next);
@@ -716,6 +732,66 @@ function clearInk() {
   ictx.clearRect(0, 0, ink.width, ink.height);
 }
 
+// ---------- Live pen surface ----------
+// A pen stroke is drawn live onto two small canvases — the settled part and the replaceable
+// tip — covering only the area of that stroke (plus a margin), grown when the pen leaves it.
+// Changing the two screen-sized canvases every frame made Safari on a 60 Hz iPad miss every
+// other frame: recorded 30 fps while Folio's script took ≤ 1 ms per event. These touch a
+// fraction of the pixels. Positions are whole device pixels, so a finished stroke can be
+// copied onto the screen-sized ink canvas without resampling.
+let liveInk, liveTip, lctx, tctx, live = null; // live: { d, X, Y, W, H } in device px of the stage
+const LIVE_MARGIN = 160; // CSS px around the stroke
+function initLive() {
+  const mk = cls => { const c = h('canvas', { class: 'live ' + cls, hidden: true }); ink.parentElement.append(c); return c; };
+  liveInk = mk('live-ink'); liveTip = mk('live-tip');
+  lctx = liveInk.getContext('2d', { desynchronized: true });
+  tctx = liveTip.getContext('2d', { desynchronized: true });
+}
+// page units → pixels of a live canvas
+function liveTransform(ctx, d) {
+  const dpr = ink._dpr, s = ppu(d) * dpr;
+  ctx.setTransform(s, 0, 0, s, (d.rect.left - d.stage.left) * dpr - live.X - pageX0(d.page) * s, (d.rect.top - d.stage.top) * dpr - live.Y - pageY0(d.page) * s);
+}
+// device-pixel box (stage) of points [x, y, r] in page units
+function liveBox(d, pts) {
+  const dpr = ink._dpr, s = ppu(d) * dpr, ox = (d.rect.left - d.stage.left) * dpr - pageX0(d.page) * s, oy = (d.rect.top - d.stage.top) * dpr - pageY0(d.page) * s;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, rmax = 0;
+  for (const [x, y, r] of pts) { if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; if (r > rmax) rmax = r; }
+  return [Math.floor((x0 - rmax) * s + ox) - 2, Math.floor((y0 - rmax) * s + oy) - 2, Math.ceil((x1 + rmax) * s + ox) + 2, Math.ceil((y1 + rmax) * s + oy) + 2];
+}
+// Makes the live area of stroke d contain box. Returns true when the canvases were (re)made,
+// i.e. the settled part has to be painted again.
+function ensureLive(d, b) {
+  // only the on-screen part matters (the area can't grow past the screen)
+  const box = [Math.max(0, b[0]), Math.max(0, b[1]), Math.min(ink.width, b[2]), Math.min(ink.height, b[3])];
+  if (live?.d === d && box[0] >= live.X && box[1] >= live.Y && box[2] <= live.X + live.W && box[3] <= live.Y + live.H) return false;
+  if (live && live.d !== d) handOffLive();
+  const dpr = ink._dpr, m = Math.round(LIVE_MARGIN * dpr), W = ink.width, H = ink.height;
+  let x0 = box[0] - m, y0 = box[1] - m, x1 = box[2] + m, y1 = box[3] + m;
+  if (live) { x0 = Math.min(x0, live.X); y0 = Math.min(y0, live.Y); x1 = Math.max(x1, live.X + live.W); y1 = Math.max(y1, live.Y + live.H); }
+  x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(W, x1); y1 = Math.min(H, y1);
+  live = { d, X: x0, Y: y0, W: Math.max(1, x1 - x0), H: Math.max(1, y1 - y0) };
+  for (const c of [liveInk, liveTip]) {
+    c.width = live.W; c.height = live.H; // (re)allocates and clears
+    Object.assign(c.style, { left: x0 / dpr + 'px', top: y0 / dpr + 'px', width: live.W / dpr + 'px', height: live.H / dpr + 'px' });
+    c.hidden = false;
+  }
+  d.tailBox = null;
+  return true;
+}
+// A finished stroke still waiting for its page render moves onto the ink canvas, so the live
+// canvases are free for the next stroke.
+function handOffLive() {
+  if (!live) return;
+  ictx.setTransform(1, 0, 0, 1, 0, 0);
+  ictx.drawImage(liveInk, live.X, live.Y);
+  clearLive();
+}
+function clearLive() {
+  live = null;
+  for (const c of [liveInk, liveTip]) { c.hidden = true; c.width = 0; c.height = 0; }
+}
+
 function startStroke(base, pt) {
   const cfg = T[ed.tool];
   const stroke = {
@@ -811,6 +887,11 @@ function drawPenInk(d) {
   }
   const radius = i => tipRadius(s, p[i][2], lengths[i], view.total);
   const hold = Math.max(16 * (1 / ppu(d)), s.width * 4);
+  // the live area must hold everything not yet settled (earlier parts are inside already);
+  // when it is made anew, the settled part is painted again from the start
+  const fresh = [];
+  for (let i = Math.max(0, d.drawn - 1); i < p.length; i++) fresh.push([p[i][0], p[i][1], radius(i)]);
+  if (ensureLive(d, liveBox(d, fresh))) { d.drawn = 1; d.prevMid = null; }
   const smp = [];
   if (!d.prevMid) {
     d.prevMid = p[0]; d.prevR = radius(0);
@@ -826,39 +907,34 @@ function drawPenInk(d) {
   }
   if (smp.length > 1) {
     const path = new Path2D(); addSamplesToPath(path, smp);
-    ictx.fillStyle = s.color; ictx.fill(path, 'nonzero');
+    liveTransform(lctx, d); lctx.fillStyle = s.color; lctx.fill(path, 'nonzero');
   }
-  const dpr = ink._dpr, scale = ppu(d) * dpr;
-  const ox = (d.rect.left - d.stage.left) * dpr - pageX0(d.page) * scale, oy = (d.rect.top - d.stage.top) * dpr - pageY0(d.page) * scale;
   const tail = [[d.prevMid[0], d.prevMid[1], d.prevR]];
   for (let i = d.drawn; i < p.length; i++) tail.push([p[i][0], p[i][1], radius(i)]);
-  // Only the area of the previous tail is cleared, not the whole screen-sized overlay: clearing
-  // (and handing the browser) ~5 million pixels every frame costs time on the iPad. The curve
-  // stays inside the hull of its points, widened by the largest radius.
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, rmax = 0;
-  for (const [x, y, r] of tail) { if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; if (r > rmax) rmax = r; }
-  const box = [Math.floor((x0 - rmax) * scale + ox) - 2, Math.floor((y0 - rmax) * scale + oy) - 2, Math.ceil((x1 + rmax) * scale + ox) + 2, Math.ceil((y1 + rmax) * scale + oy) + 2];
-  octx.setTransform(1, 0, 0, 1, 0, 0);
-  if (d.tailBox) octx.clearRect(d.tailBox[0], d.tailBox[1], d.tailBox[2] - d.tailBox[0], d.tailBox[3] - d.tailBox[1]);
-  else octx.clearRect(0, 0, overlay.width, overlay.height);
+  // Only the area of the previous tip is cleared. The curve stays inside the hull of its
+  // points, widened by the largest radius.
+  const b = liveBox(d, tail), box = [b[0] - live.X, b[1] - live.Y, b[2] - live.X, b[3] - live.Y];
+  tctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (d.tailBox) tctx.clearRect(d.tailBox[0], d.tailBox[1], d.tailBox[2] - d.tailBox[0], d.tailBox[3] - d.tailBox[1]);
+  else tctx.clearRect(0, 0, liveTip.width, liveTip.height);
   d.tailBox = box;
-  octx.setTransform(scale, 0, 0, scale, ox, oy);
+  liveTransform(tctx, d);
   const path = new Path2D(); addSamplesToPath(path, strokeSamples(tail, i => tail[i][2]));
-  octx.fillStyle = s.color; octx.fill(path, 'nonzero');
-  // back to the overlay's own transform (sizeOverlay), so drawOverlay clears all of it
-  const odpr = window.devicePixelRatio || 1;
-  octx.setTransform(odpr, 0, 0, odpr, 0, 0);
+  tctx.fillStyle = s.color; tctx.fill(path, 'nonzero');
 }
 
 // Keep the complete finished tail visible during the asynchronous page render. Without
-// this handoff the tail would vanish for a frame when the overlay loses its predictions.
+// this handoff the tail would vanish for a frame when the tip layer is cleared.
 function paintFinishedPen(d, s) {
   const p = s.points;
-  inkTransform(d);
   const tail = d.drawn === 1 ? [p[0]] : [[d.prevMid[0], d.prevMid[1], d.prevR]];
   for (let i = d.drawn; i < p.length; i++) tail.push(p[i]);
   const path = new Path2D(); addSamplesToPath(path, strokeSamples(tail, i => tail[i][2]));
-  ictx.fillStyle = s.color; ictx.fill(path, 'nonzero');
+  const grown = ensureLive(d, liveBox(d, p));
+  liveTransform(lctx, d);
+  if (grown) drawStroke(lctx, s); // the area had to grow: paint the whole finished stroke
+  else { lctx.fillStyle = s.color; lctx.fill(path, 'nonzero'); }
+  tctx.setTransform(1, 0, 0, 1, 0, 0); tctx.clearRect(0, 0, liveTip.width, liveTip.height);
 }
 
 // Predicted Pencil points (getPredictedEvents): a short provisional tip on the overlay layer,
@@ -895,7 +971,9 @@ function clearCommitted() {
   if (pendingInk) return;
   clearInk();
   const d = drawing;
-  if (d?.kind === 'stroke') { d.drawn = 1; d.prevMid = null; drawLive(); }
+  if (live && live.d !== d) clearLive(); // a stroke being drawn keeps its own live area
+  // other strokes drawn on the ink canvas meanwhile are painted again
+  if (d?.kind === 'stroke' && !(d.input && !d.snapped)) { d.drawn = 1; d.prevMid = null; drawLive(); }
 }
 
 // ---------- Eraser ----------
@@ -919,18 +997,19 @@ function eraseTo(pt) {
   const d = drawing, a = d.last;
   d.last = pt;
   const cfg = T.eraser;
-  let hit = false;
+  let hit = null; // area of the strokes touched: only that part of the page is redrawn
   const next = [];
   for (const s of d.work) {
     const r = d.r + (s.width || 0) / 2;
     if (s.type !== 'stroke' || (cfg.hlOnly && s.tool !== 'highlighter') || !strokeHit(s, a, pt, r)) { next.push(s); continue; }
-    hit = true;
+    const b = bbox(s);
+    hit = hit ? unionBox([{ ...hit, type: 'image' }, { ...b, type: 'image' }]) : b;
     if (cfg.mode === 'precise') next.push(...splitStroke(s, a, pt, r));
   }
   if (!hit) return;
   d.work = next;
   d.page.elements = next;
-  queueRender(d.el);
+  repaintArea(d.el, { x: hit.x - 6, y: hit.y - 6, w: hit.w + 12, h: hit.h + 12 });
 }
 let renderQueued = null;
 function queueRender(el) {
@@ -942,10 +1021,10 @@ function queueRender(el) {
 function startLasso(base, pt, e) {
   if (ed.sel && ed.sel.page === base.page) {
     const box = unionBox(selEls());
-    if (e.target.closest('.sel-handle')) { drawing = { ...base, kind: 'resize', before: base.page.elements, box, origin: pt }; return; }
+    if (e.target.closest('.sel-handle')) { drawing = { ...base, kind: 'resize', before: base.page.elements, box, origin: pt }; liftSelection(drawing); return; }
     const wh = e.target.closest('.sel-wh');
     if (wh) { drawing = { ...base, kind: 'textwidth', side: wh.dataset.side, before: base.page.elements, origin: pt }; return; }
-    if (inBox(pt, { x: box.x - 8, y: box.y - 8, w: box.w + 16, h: box.h + 16 })) { drawing = { ...base, kind: 'move', before: base.page.elements, origin: pt }; return; }
+    if (inBox(pt, { x: box.x - 8, y: box.y - 8, w: box.w + 16, h: box.h + 16 })) { drawing = { ...base, kind: 'move', before: base.page.elements, origin: pt }; liftSelection(drawing); return; }
   }
   clearSelection();
   drawing = { ...base, kind: 'lasso', path: [[e.clientX, e.clientY]], pagePts: [pt] };
@@ -966,8 +1045,9 @@ function transformSelection(pt) {
     queueRender(d.el);
     return renderSelection();
   }
+  let dx = 0, dy = 0;
   if (d.kind === 'move') {
-    const dx = pt[0] - d.origin[0], dy = pt[1] - d.origin[1];
+    dx = pt[0] - d.origin[0]; dy = pt[1] - d.origin[1];
     fn = (x, y) => [x + dx, y + dy];
   } else {
     const b = d.box;
@@ -975,8 +1055,43 @@ function transformSelection(pt) {
     fn = (x, y) => [b.x + (x - b.x) * k, b.y + (y - b.y) * k];
   }
   d.page.elements = d.before.map(e => ids.has(e.id) ? transformEl(e, fn, k) : e);
-  queueRender(d.el);
-  renderSelection();
+  // the lifted selection and its frame follow by a CSS transform (no page render per move)
+  const px = d.el.clientWidth / pageW(d.page), b = d.lift.box;
+  const follow = (node, x, y) => {
+    if (!node) return;
+    node.style.transformOrigin = `${(b.x - x) * px}px ${(b.y - y) * px}px`;
+    node.style.transform = `translate(${dx * px}px, ${dy * px}px) scale(${k})`;
+  };
+  follow(d.lift.c, d.lift.x, d.lift.y);
+  const sb = d.el.querySelector('.selbox');
+  sb?.classList.add('dragging');
+  follow(sb, b.x - 6, b.y - 6); // renderSelection pads the frame by 6
+}
+
+// While a selection is moved or resized it is lifted off the page: drawn once onto its own
+// canvas, which then just follows the pointer, instead of the whole page being re-rendered on
+// every move. The page is redrawn once without it, and once more when it is dropped.
+async function liftSelection(d) {
+  const page = d.page, el = d.el, els = selEls(), b = d.kind === 'resize' ? d.box : unionBox(els);
+  const pad = 4, x = b.x - pad, y = b.y - pad, w = b.w + 2 * pad, hh = b.h + 2 * pad;
+  const s = Math.min(el.clientWidth / pageW(page) * (window.devicePixelRatio || 1), Math.sqrt(8e6 / (w * hh)));
+  const c = h('canvas', { class: 'sel-lift', style: { left: pctX(page, x), top: pctY(page, y), width: w / pageW(page) * 100 + '%', height: hh / pageH(page) * 100 + '%' } });
+  c.width = Math.max(1, Math.round(w * s)); c.height = Math.max(1, Math.round(hh * s));
+  d.lift = { c, x, y, box: b };
+  el.append(c);
+  await renderElements(c.getContext('2d'), els, s, -x * s, -y * s);
+  if (drawing !== d) return; // already dropped
+  ed.lift = { page, ids: new Set(ed.sel.ids) };
+  renderEl(el);
+}
+// Puts a lifted selection back: the page is rendered with it (by commit, or here when nothing
+// changed), then the lifted copy is removed.
+function dropLift(d, next) {
+  const lifted = !!ed.lift;
+  ed.lift = null;
+  const done = next ? commit(d.page, next) : lifted ? renderEl(d.el) : null;
+  if (!next) renderSelection();
+  Promise.resolve(done).then(() => d.lift?.c.remove());
 }
 
 function selectable(e) {
@@ -1060,14 +1175,19 @@ export function deleteSelection() {
   clearSelection();
   commit(page, page.elements.filter(e => !ids.has(e.id)));
 }
+// Copying also puts the text of the copied text boxes on the system clipboard (empty without
+// any): pasting then knows whether something was copied elsewhere since.
+let copiedText = null;
 function copySelection() {
   if (!ed.sel) return;
   clipboard = structuredClone(selEls());
+  copiedText = clipboard.filter(e => e.type === 'text').map(e => e.text).join('\n');
+  navigator.clipboard?.writeText?.(copiedText).catch(() => {});
   toast('Kopiert');
 }
 function cutSelection() { copySelection(); deleteSelection(); }
-function placeCopies(page, els, offset) {
-  const copies = els.map(e => ({ ...transformEl(e, (x, y) => [x + offset, y + offset]), id: uid() }));
+function placeCopies(page, els, dx, dy = dx) {
+  const copies = els.map(e => ({ ...transformEl(e, (x, y) => [x + dx, y + dy]), id: uid() }));
   commit(page, [...page.elements, ...copies]);
   if (ed.tool !== 'lasso') selectTool('lasso');
   selectIds(page, copies.map(c => c.id));
@@ -1076,6 +1196,46 @@ function duplicateSelection() { if (ed.sel) placeCopies(ed.sel.page, selEls(), 2
 function paste() {
   if (!clipboard?.length) return toast('Zwischenablage ist leer');
   placeCopies(currentPage(), structuredClone(clipboard), 20);
+}
+
+// ---------- Paste at a point (long press with a finger, right click) ----------
+function pasteMenu(pageEl, cx, cy) {
+  const pt = toPage({ clientX: cx, clientY: cy }, pageEl);
+  menu({ x: cx, y: cy }, [{ label: 'Einsetzen', icon: 'paste', action: () => pasteAt(pageEl._page, pt) }]);
+}
+// Pastes what was copied last at pt (its top left corner): Folio's own copy (lasso), or text
+// copied elsewhere as a new text box.
+async function pasteAt(page, pt) {
+  let text = null;
+  try { text = await navigator.clipboard?.readText?.(); } catch {} // iPad asks with its own "Einsetzen" bubble
+  if (clipboard?.length && (text == null || text === copiedText)) {
+    const b = unionBox(clipboard);
+    return placeCopies(page, structuredClone(clipboard), pt[0] - b.x, pt[1] - b.y);
+  }
+  if (!text?.trim()) return toast('Zwischenablage ist leer');
+  const cfg = T.text;
+  const t = {
+    id: uid(), type: 'text', x: pt[0], y: pt[1],
+    w: Math.max(160, Math.min(560, pageX0(page) + pageW(page) - pt[0] - 30)), size: cfg.size, color: cfg.colors[cfg.color], text: text.replace(/\r\n?/g, '\n'),
+    ...(cfg.bold ? { bold: true } : {}), ...(cfg.italic ? { italic: true } : {}), ...(cfg.font && cfg.font !== 'sans' ? { font: cfg.font } : {}),
+  };
+  commit(page, [...page.elements, t]);
+  if (ed.tool !== 'lasso') selectTool('lasso');
+  selectIds(page, [t.id]);
+}
+// Finger long press: a still single touch for 500 ms (not while writing).
+let press = null;
+function cancelPress() { if (press) { clearTimeout(press.t); press = null; } }
+function watchPress(e) {
+  cancelPress();
+  if (settings.fingerDraw || touches.size !== 1 || palmLikely() || !e.target.closest('.page') || e.target.closest('.selbox, .text-editor')) return;
+  const p = press = { id: e.pointerId, x: e.clientX, y: e.clientY };
+  p.t = setTimeout(() => {
+    if (press !== p || touches.size !== 1) return;
+    press = null; gesture = null; tap = null; stopMomentum(); // the finger now stays still
+    const el = document.elementFromPoint(p.x, p.y)?.closest('.page');
+    if (el) pasteMenu(el, p.x, p.y);
+  }, 500);
 }
 
 // ---------- Text ----------
