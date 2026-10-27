@@ -311,11 +311,12 @@ function onMove(e) {
       else if (!d.snapped) {
         const pen = e.pointerType === 'pen';
         for (const ev of evs) addPoint(d, toPage(ev, d.el, d.rect, true, pen), ev.timeStamp || e.timeStamp);
-        // where the Pencil is about to be: drawn as a provisional tip, never stored. Without
-        // browser predictions, the input extrapolates one frame ahead itself.
+        // where the Pencil is about to be: drawn as a provisional tip, never stored. Folio's own
+        // prediction reaches to about when this frame is on screen (now + one frame); the
+        // browser's predicted events (only ~8 ms ahead in Safari) are the fallback.
         const predictions = !d.redraw && e.getPredictedEvents ? e.getPredictedEvents().map(ev => [...toPage(ev, d.el, d.rect, true, pen), ev.timeStamp]) : [];
         d.pred = d.input ? penPredictions(predictions, e.timeStamp, toPage(e, d.el, d.rect, true), ppu(d)) : predictions;
-        if (d.input && !d.pred.length) d.pred = d.input.extrapolate(frameMs);
+        if (d.input) { const own = d.input.predict(performance.now() - d.input.time + frameMs); if (own.length) d.pred = own; }
       }
       if (!d.snapped) { liveNow(); watchHold(d, e); }
       else if (d.snapped.pts.length === 2 && !d.snapped.closed) {
@@ -843,7 +844,7 @@ function liveNow() {
   liveFrame = true;
   requestAnimationFrame(t => {
     liveFrame = false;
-    // the display's frame time (60 or 120 Hz) — how far ahead the extrapolated tip reaches
+    // the display's frame time (60 or 120 Hz) — how far ahead the predicted tip reaches
     if (lastFrame && t - lastFrame > 4 && t - lastFrame < 40) frameMs += (t - lastFrame - frameMs) * 0.2;
     lastFrame = t;
   });
