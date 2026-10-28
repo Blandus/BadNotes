@@ -14,10 +14,10 @@ import { store, settings, emit } from './store.js';
 import { renderThumb } from './render.js';
 import { toast } from './ui.js';
 
-export const CONTENT = { notebook: 'pages', textdoc: 'blocks' };
+export const CONTENT = { notebook: 'pages', textdoc: 'blocks', deck: 'cards' };
 // fields a stub keeps in sync with the full document (everything except the content)
 export const META = ['name', 'parent', 'favorite', 'trashed', 'trashedBy', 'cover', 'color', 'icon', 'opened', 'conflicts'];
-const STUB_ONLY = ['offloaded', 'remoteUpd', 'size', 'pageCount', 'thumb'];
+const STUB_ONLY = ['offloaded', 'remoteUpd', 'size', 'pageCount', 'cardCount', 'thumb'];
 const RECENT_MS = 3 * 86400000;
 export const OFFLOAD_SIZES = [2e6, 5e6, 20e6];
 export const offloadOn = () => settings.offload !== false;
@@ -51,6 +51,7 @@ export async function makeStub(r) {
     const files = new Set(r.pages.map(p => p.pdf?.file).filter(Boolean));
     if (files.size) stub.pdfFiles = [...files];
   }
+  if (r.kind === 'deck') stub.cardCount = r.cards.length;
   return stub;
 }
 // Metadata changes of a stub, put onto the full version from Drive.
@@ -137,4 +138,30 @@ export async function keepFilesLocal(r) {
   if (!r?.pdfFiles?.length || !hooks.signedIn()) return;
   const { fetchFileNow } = await import('./pdfdoc.js');
   for (const id of r.pdfFiles) { try { await fetchFileNow(id); } catch {} }
+}
+
+// Folder: everything inside it (subfolders too) goes to Drive only, including the original PDFs
+// once they are in Drive. Favourites, documents open in a tab and ones not synced yet stay.
+// Returns { done, kept: { favorite, open, unsynced } }.
+export async function offloadFolder(folderId) {
+  const all = await store.list();
+  const inside = new Set([folderId]);
+  for (let grew = true; grew;) { grew = false; for (const r of all) if (r.parent && inside.has(r.parent) && !inside.has(r.id)) { inside.add(r.id); grew = true; } }
+  const res = { done: 0, kept: { favorite: 0, open: 0, unsynced: 0 } };
+  for (const r of all) {
+    if (r.id === folderId || !inside.has(r.id) || !CONTENT[r.kind] || r.deleted || r.trashed) continue;
+    if (r.favorite) { res.kept.favorite++; continue; }
+    if (hooks.isOpen(r.id)) { res.kept.open++; continue; }
+    if (!r.offloaded) {
+      const full = await store.get(r.id);
+      if (!full || !(await offload(full))) { res.kept.unsynced++; continue; }
+    }
+    for (const id of r.pdfFiles || []) {
+      const f = await store.getFile(id);
+      if (f?.blob && f.uploaded) await store.putFile({ ...f, blob: null });
+    }
+    res.done++;
+  }
+  if (res.done) emit('change', null);
+  return res;
 }

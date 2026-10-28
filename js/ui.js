@@ -92,7 +92,7 @@ export function sheet({ title, body, done = 'Fertig', onDone, cancel = true, cla
     };
     const submit = async () => { const v = onDone ? await onDone() : true; if (v !== false) finish(v); };
     const onKey = e => {
-      if (e.key === 'Escape') finish(null);
+      if (e.key === 'Escape') { if (document.querySelector('.popover')) return; finish(null); } // Esc closes an open menu first
       if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') { e.preventDefault(); submit(); }
     };
     document.addEventListener('keydown', onKey);

@@ -8,8 +8,10 @@ import { openDoc } from './editor.js';
 import { suggestNames } from './suggest.js';
 import { sync, signIn, signOut, signedIn } from './sync.js';
 import { newTextDoc, openTextDoc, renderTextThumb, plainText, printDoc } from './textdoc.js';
+import { newDeck, openDeck, deckArt, deckText, importCardsSheet, exportDeck } from './deck.js';
+import { renderLearnPlan, todayCount } from './learnplan.js';
 import { renderCalendar, CAL_KINDS } from './calendar.js';
-import { ensureLocal, offload, runOffload, recordSize, offloadOn, offloadMin, OFFLOAD_SIZES, keepFilesLocal } from './offload.js';
+import { ensureLocal, offload, runOffload, recordSize, offloadOn, offloadMin, OFFLOAD_SIZES, keepFilesLocal, offloadFolder } from './offload.js';
 import { recording, setRecording } from './pencilrec.js';
 
 const SECTIONS = {
@@ -18,6 +20,7 @@ const SECTIONS = {
   recent: { label: 'Zuletzt geöffnet', icon: 'clock' },
   trash: { label: 'Papierkorb', icon: 'trash' },
   calendar: { label: 'Kalender', icon: 'calendar' },
+  learn: { label: 'Lernen', icon: 'cards' },
 };
 const SORTS = [['date', 'Datum', 'Änderungsdatum'], ['created', 'Erstellt', 'Erstellungsdatum'], ['name', 'Name', 'Name']];
 
@@ -88,7 +91,7 @@ function folderPath(id) {
   return out;
 }
 const descendants = id => live().filter(r => r.parent === id).flatMap(r => [r, ...(r.kind === 'folder' ? descendants(r.id) : [])]);
-const containsText = (r, q) => r.kind === 'textdoc' ? plainText(r).toLowerCase().includes(q) : r.kind === 'notebook' && r.pages.some(p => (p.pdfText || '').toLowerCase().includes(q) || p.elements.some(e => e.type === 'text' && e.text.toLowerCase().includes(q)));
+const containsText = (r, q) => r.kind === 'textdoc' ? plainText(r).toLowerCase().includes(q) : r.kind === 'deck' ? deckText(r).toLowerCase().includes(q) : r.kind === 'notebook' && r.pages.some(p => (p.pdfText || '').toLowerCase().includes(q) || p.elements.some(e => e.type === 'text' && e.text.toLowerCase().includes(q)));
 
 const kindOk = r => lib.filter === 'all' || r.kind === lib.filter; // filter tabs
 
@@ -131,6 +134,11 @@ export async function renderLibrary() {
   records = (await store.list()).filter(r => !CAL_KINDS.has(r.kind)); // calendar records live in the calendar view
   if (lib.folder && (!byId(lib.folder) || byId(lib.folder).trashed)) lib.folder = null;
   renderSidebar();
+  if (lib.section === 'learn') { // all flashcard decks at a glance (learnplan.js)
+    $('#libHead').replaceChildren(h('div', { class: 'lib-titlebar' }, sidebarBtn(), h('div', { class: 'lib-title' }, h('h1', { id: 'libTitle' }, 'Lernen'))));
+    updateSidebar();
+    return renderLearnPlan($('#libContent'), { newDeck: newCardDeck, importCards: () => importCardsSheet({}) });
+  }
   if (lib.section === 'calendar') {
     $('#libHead').replaceChildren(h('div', { class: 'lib-titlebar' }, sidebarBtn(), h('div', { class: 'lib-title' }, h('h1', { id: 'libTitle' }, 'Kalender'))));
     updateSidebar();
@@ -149,6 +157,7 @@ bus.addEventListener('change', () => { if (!root.hidden) renderLibrary(); });
 bus.addEventListener('sync', () => { const s = $('#sbStatus'); if (s) s.textContent = settings.syncStatus || 'Synchronisieren'; });
 bus.addEventListener('account', () => renderSidebar());
 
+export const goSection = section => go(section); // (deck.js: back to the learning overview)
 function go(section, folder = null) {
   mobileSidebarOpen = false;
   lib.section = section; lib.folder = folder; lib.query = '';
@@ -193,6 +202,7 @@ function renderSidebar() {
       item('favorites', SECTIONS.favorites),
       item('trash', SECTIONS.trash),
       item('calendar', SECTIONS.calendar),
+      learnItem(),
       folders.length ? h('div', { class: 'sb-label' }, 'Ordner') : null,
       ...folders.map(f => h('button', {
         class: 'sb-item sub' + (lib.folder && folderPath(lib.folder)[0]?.id === f.id ? ' active' : ''),
@@ -215,6 +225,15 @@ function renderSidebar() {
         : h('button', { class: 'sb-signin', onclick: signIn }, googleG(), h('span', {}, 'Mit Google anmelden')),
       h('button', { class: 'sb-gear', title: 'Einstellungen', 'aria-label': 'Einstellungen', onclick: () => { if (compactLibrary.matches) setMobileSidebar(false); openSettings(); } }, icon('gear', 18))));
 }
+// "Lernen": the learning overview of all flashcard decks, with the number of cards due today
+function learnItem() {
+  const badge = h('b', { class: 'sb-badge', hidden: true });
+  todayCount().then(n => { if (n) { badge.textContent = n > 999 ? '999+' : n; badge.hidden = false; badge.title = `${n} Karten heute`; } }).catch(() => {});
+  return h('button', {
+    class: 'sb-item' + (lib.section === 'learn' && !lib.query ? ' active' : ''), onclick: () => go('learn'),
+  }, icon('cards', 20), h('span', {}, SECTIONS.learn.label), badge);
+}
+
 // Google's "G" (official brand colours, as Google's sign-in guidelines ask for on sign-in buttons)
 function googleG() {
   const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -224,7 +243,7 @@ function googleG() {
 }
 
 // ---------- Header ----------
-const FILTERS = [['all', 'Alle'], ['notebook', 'Notizbücher'], ['textdoc', 'Textdokumente'], ['folder', 'Ordner']];
+const FILTERS = [['all', 'Alle'], ['notebook', 'Notizbücher'], ['textdoc', 'Textdokumente'], ['deck', 'Karteikarten'], ['folder', 'Ordner']];
 function renderHeader() {
   const head = $('#libHead');
   const path = lib.folder ? folderPath(lib.folder) : [];
@@ -289,6 +308,7 @@ function thumbFor(r, width) {
     const count = live().filter(x => x.parent === r.id && !x.trashed).length;
     return folderArt(r, count);
   }
+  if (r.kind === 'deck') return deckArt(r, width < 60); // flashcards: a stack of cards, no page preview
   if (r.offloaded && !r.cover) { // kept only in Drive: the small preview saved with the stub
     return r.thumb ? h('img', { class: 'paper stub-thumb', src: r.thumb, alt: '' }) : h('div', { class: 'paper stub-thumb empty' }, icon('cloud', 28));
   }
@@ -366,6 +386,7 @@ function activate(r) {
   if (r.trashed) return itemMenu(r, null);
   if (r.kind === 'folder') go('docs', r.id);
   else if (r.kind === 'textdoc') openTextDoc(r.id);
+  else if (r.kind === 'deck') openDeck(r.id);
   else openDoc(r.id);
 }
 
@@ -394,7 +415,7 @@ function row(r) {
       h('div', { class: 'row-thumb' }, thumbFor(r, 40)),
       h('div', { class: 'row-main' },
         h('div', { class: 'row-title' }, r.name, r.favorite ? icon('starFill', 12) : '', r.offloaded ? h('span', { class: 'cloud-inline', title: 'Nur in Google Drive' }, icon('cloud', 14)) : '', r.conflicts?.length ? h('span', { class: 'conflict-badge inline', title: 'Sync-Hinweis: auf mehreren Geräten geändert' }, '!') : ''),
-        h('div', { class: 'row-sub' }, sub(r) + (r.kind === 'notebook' ? ` · ${r.pageCount ?? r.pages.length} ${(r.pageCount ?? r.pages.length) === 1 ? 'Seite' : 'Seiten'}` : r.kind === 'textdoc' ? ' · Textdokument' : '') + (r.offloaded ? ' · nur in Google Drive' : ''))),
+        h('div', { class: 'row-sub' }, sub(r) + (r.kind === 'notebook' ? ` · ${r.pageCount ?? r.pages.length} ${(r.pageCount ?? r.pages.length) === 1 ? 'Seite' : 'Seiten'}` : r.kind === 'textdoc' ? ' · Textdokument' : r.kind === 'deck' ? ` · ${r.cardCount ?? 0} Karten` : '') + (r.offloaded ? ' · nur in Google Drive' : ''))),
       lib.selecting ? h('span', { class: 'checkmark' }, lib.selected.has(r.id) ? icon('check', 16) : '') : null),
     lib.selecting ? null : h('button', { class: 'chev', title: 'Optionen', 'aria-label': 'Optionen', onclick: e => itemMenu(r, e.currentTarget) }, icon('dots', 18)));
   if (r.kind === 'folder' && !r.trashed) el.dataset.drop = r.id;
@@ -500,6 +521,7 @@ function newMenu(anchor) {
     { label: 'Notizbuch', icon: 'doc', action: newNotebookSheet },
     { label: 'Schnellnotiz', icon: 'quick', action: quickNote },
     { label: 'Textdokument', icon: 'text', action: newTextDocument },
+    { label: 'Karteikarten', icon: 'cards', action: newCardDeck },
     { label: 'Ordner', icon: 'folder', action: createFolder },
     '-',
     { label: 'PDF importieren', icon: 'pdf', action: importPdf },
@@ -507,6 +529,7 @@ function newMenu(anchor) {
     { label: 'Goodnotes-Ordner (ZIP) importieren', icon: 'folder', action: importGoodnotes },
     { label: 'PDF/Goodnotes aus Zwischenablage', icon: 'paste', action: importFromClipboard },
     { label: 'Bild importieren', icon: 'image', action: importImage },
+    { label: 'Karteikarten importieren', icon: 'cards', action: () => importCardsSheet({ parent: lib.section === 'docs' ? lib.folder : null }) },
   ]);
 }
 
@@ -518,7 +541,7 @@ function itemMenu(r, anchor) {
       { label: 'Endgültig löschen', icon: 'trash', danger: true, action: () => purge([r.id]) },
     ]);
   }
-  const nb = r.kind === 'notebook', text = r.kind === 'textdoc', doc = nb || text;
+  const nb = r.kind === 'notebook', text = r.kind === 'textdoc', deck = r.kind === 'deck', doc = nb || text || deck;
   // actions that need the content: load it from Drive first if the document is kept only there
   const full = fn => async () => { const d = await ensureLocal(r); if (d) fn(d); };
   menu(at, [
@@ -531,10 +554,13 @@ function itemMenu(r, anchor) {
     doc && !r.offloaded && !r.favorite && signedIn() && { label: 'Nur in Google Drive behalten', icon: 'cloud', action: () => offloadNow(r) },
     nb && { label: 'Cover ändern', icon: 'palette', action: () => changeCover(r) },
     r.kind === 'folder' && { label: 'Farbe & Symbol', icon: 'palette', action: () => changeFolderLook(r) },
+    r.kind === 'folder' && signedIn() && { label: 'Ordner nur in Google Drive behalten', icon: 'cloud', action: () => offloadFolderNow(r) },
     r.conflicts?.length && { label: `Sync-Hinweise (${r.conflicts.length})`, icon: 'sync', action: () => clearConflicts(r) },
     nb && { label: 'Als PDF exportieren', icon: 'share', action: full(d => exportPdf(d)) },
     text && { label: 'Als PDF (Drucken)', icon: 'share', action: full(d => printDoc(d)) },
-    doc && { label: 'Als Goodnotes-Datei (Beta)', icon: 'doc', action: full(async d => (await import('./goodnotes-export.js')).exportGoodnotes(d)) },
+    deck && { label: 'Karten importieren', icon: 'paste', action: full(d => importCardsSheet({ deck: d })) },
+    deck && { label: 'Als Text exportieren', icon: 'share', action: full(d => exportDeck(d)) },
+    (nb || text) && { label: 'Als Goodnotes-Datei (Beta)', icon: 'doc', action: full(async d => (await import('./goodnotes-export.js')).exportGoodnotes(d)) },
     '-',
     { label: 'In Papierkorb', icon: 'trash', danger: true, action: () => trash([r.id]) },
   ]);
@@ -546,6 +572,13 @@ async function update(r, patch) {
   await store.put(r);
   // favourites stay on the device: one that was kept only in Drive is loaded now, with its PDFs
   if (patch.favorite) (r.offloaded ? ensureLocal(r) : Promise.resolve()).then(() => keepFilesLocal(r));
+}
+async function offloadFolderNow(r) {
+  toast('Ordner wird mit Google Drive abgeglichen …', 0);
+  try { await sync(false); } catch {}
+  const { done, kept } = await offloadFolder(r.id);
+  const rest = [kept.favorite && `${kept.favorite} Favorit(en)`, kept.open && `${kept.open} geöffnet`, kept.unsynced && `${kept.unsynced} noch nicht synchronisiert`].filter(Boolean).join(', ');
+  toast(done ? `${done} Dokument(e) liegen jetzt nur in Google Drive` + (rest ? ` – geblieben: ${rest}` : '') : rest ? `Nichts verschoben – ${rest}` : 'Der Ordner enthält nichts zum Auslagern', 5000);
 }
 async function offloadNow(r) {
   if (await offload(r)) toast(`„${r.name}“ liegt jetzt nur in Google Drive (${fmtBytes((await store.getMeta(r.id))?.size || 0)} frei)`, 3500);
@@ -567,10 +600,12 @@ async function duplicate(ids) {
   // one document at a time: each copy is loaded, cloned and saved before the next
   let n = 0;
   for (const r of ids.map(byId)) {
-    if (r?.kind !== 'notebook' && r?.kind !== 'textdoc') continue;
+    if (r?.kind !== 'notebook' && r?.kind !== 'textdoc' && r?.kind !== 'deck') continue;
     const d = await ensureLocal(r);
     if (!d) return;
-    const copy = d.kind === 'textdoc'
+    const copy = d.kind === 'deck'
+      ? { ...structuredClone(d), id: newDeck().id, name: d.name + ' Kopie', created: Date.now(), updated: Date.now(), opened: Date.now(), favorite: false, cards: d.cards.map(c => ({ ...structuredClone(c), id: newDeck().id })) }
+      : d.kind === 'textdoc'
       ? { ...structuredClone(d), id: newTextDoc().id, name: d.name + ' Kopie', created: Date.now(), updated: Date.now(), opened: Date.now(), favorite: false }
       : cloneNotebook(d, d.name + ' Kopie');
     for (const k of ['offloaded', 'remoteUpd', 'size', 'pageCount', 'thumb', 'conflicts', 'light']) delete copy[k];
@@ -838,6 +873,14 @@ async function newTextDocument() {
   const doc = newTextDoc({ parent: lib.section === 'docs' ? lib.folder : null });
   await store.put(doc);
   openTextDoc(doc.id);
+}
+
+async function newCardDeck() {
+  const name = await promptText('Neue Karteikarten', '', 'Name des Stapels');
+  if (!name) return;
+  const d = newDeck({ name, parent: lib.section === 'docs' ? lib.folder : null });
+  await store.put(d);
+  openDeck(d.id);
 }
 
 async function createFolder() {

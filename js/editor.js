@@ -10,6 +10,7 @@ import { renderLibrary, templatePicker, openSettings, showConflicts } from './li
 import { clearSelection, renderSelection, finishText, selectIds, hasSelection, deleteSelection } from './tools.js';
 import { addPageMenu as openAddPage } from './addpage.js';
 import { ensureLocal } from './offload.js';
+import { showTextDoc, leaveTextDoc } from './textdoc.js';
 
 // Page canvases only need to look fine while scrolling; the detail layer provides sharpness.
 // Keeping them smaller saves iPad memory and makes each re-render faster.
@@ -85,7 +86,8 @@ const view = $('#editor');
 // another); they share the document itself, each keeps its own position.
 const tabOf = key => ed.tabs.find(t => t.key === key);
 const tabNames = new Map();
-function persistTabs() { settings.tabs = ed.tabs; settings.activeTab = view.hidden ? null : ed.tab; saveSettings(); }
+const tabbar = $('#tabbar'); // moves between the editor and text document views, so it can be detached
+function persistTabs() { settings.tabs = ed.tabs; settings.activeTab = view.hidden && !settings.openText ? null : ed.tab; saveSettings(); }
 
 // Opens a document. Re-uses a tab already showing it unless newTab is set; page = page index to show.
 export async function openDoc(id, { newTab = false, page } = {}) {
@@ -117,6 +119,13 @@ export async function activateTab(key, page) {
     return toast('Dokument nicht gefunden');
   }
   ed.tab = key;
+  if (doc.kind === 'textdoc') { // text documents share the tabs; the editor view makes room for theirs
+    hideEditor();
+    await showTextDoc(doc.id);
+    persistTabs(); renderTabs();
+    return;
+  }
+  if (settings.openText) await leaveTextDoc();
   $('#library').hidden = true; view.hidden = false;
   persistTabs();
   if (!same) {
@@ -130,15 +139,20 @@ export async function activateTab(key, page) {
   renderTabs(); renderThumbs(); updateChrome(); renderOptions();
 }
 
-export async function showLibrary() {
-  await finishText();
-  await flushSave();
-  saveView();
+function hideEditor() {
   ed.doc = null;
   clearSelection(); closePopover();
   observer.disconnect(); visible.clear();
   $('#pages').replaceChildren();
-  view.hidden = true; $('#library').hidden = false;
+  view.hidden = true;
+}
+
+export async function showLibrary() {
+  await finishText();
+  await flushSave();
+  saveView();
+  if (settings.openText) await leaveTextDoc();
+  hideEditor(); $('#library').hidden = false;
   persistTabs();
   renderLibrary();
 }
@@ -173,16 +187,17 @@ function restoreView(tab, page) {
 async function renderTabs() {
   for (const id of new Set(ed.tabs.map(t => t.id))) {
     if (id === ed.doc?.id) { tabNames.set(id, ed.doc.name); continue; }
-    const r = await store.get(id);
+    const r = await store.getMeta(id);
     if (!r || r.deleted || r.trashed) ed.tabs = ed.tabs.filter(t => t.id !== id);
     else tabNames.set(id, r.name);
   }
-  $('#tabs').replaceChildren(...ed.tabs.map(t => h('div', { class: 'tab' + (t.key === ed.tab ? ' active' : ''), 'data-key': t.key },
+  tabbar.querySelector('#tabs').replaceChildren(...ed.tabs.map(t => h('div', { class: 'tab' + (t.key === ed.tab ? ' active' : ''), 'data-key': t.key },
     h('button', { class: 'tab-title', onclick: () => t.key !== ed.tab && activateTab(t.key) }),
     h('button', { class: 'tab-close', title: 'Tab schließen', onclick: () => closeTab(t.key) }, icon('close', 14)))));
   updateTabLabels();
   // Tabs only appear once more than one tab is open (the web app has none).
-  $('#tabbar').hidden = ed.tabs.length < 2;
+  tabbar.hidden = ed.tabs.length < 2;
+  (settings.openText ? $('#textdoc') : view).prepend(tabbar); // the strip sits on top of whichever document is open
   if (ed.doc) {
     $('#docTitleText').textContent = ed.doc.name;
     // breadcrumb: the folder the document lives in
@@ -192,7 +207,7 @@ async function renderTabs() {
 }
 // Tab titles; when a document is open in several tabs, each shows its page number.
 function updateTabLabels() {
-  for (const el of document.querySelectorAll('#tabs .tab')) {
+  for (const el of tabbar.querySelectorAll('#tabs .tab')) {
     const t = tabOf(el.dataset.key);
     if (!t) continue;
     const name = tabNames.get(t.id) || '';
@@ -1142,3 +1157,6 @@ export function initEditor() {
   buildToolbar();
   selectTool(ed.tool);
 }
+
+// a text document's title changes with its first heading: keep its tab label current
+bus.addEventListener('change', e => { if (settings.openText && e.detail === settings.openText) renderTabs(); });

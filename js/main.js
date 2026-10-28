@@ -8,6 +8,7 @@ import { initEditor, activateTab, flushSave, isLocked, ed } from './editor.js';
 import { initTools } from './tools.js';
 import { configureSync, scheduleSync } from './sync.js';
 import { openTextDoc, textLocked } from './textdoc.js';
+import { openDeck, deckLocked, importCardsSheet } from './deck.js';
 
 // Sample content on first start, so every view has something to show.
 async function seed() {
@@ -52,6 +53,16 @@ const isPdf = f => f.type === 'application/pdf' || f.type === 'application/zip' 
 document.addEventListener('dragover', e => { if ([...e.dataTransfer.items].some(i => i.kind === 'file')) e.preventDefault(); });
 document.addEventListener('drop', e => {
   const pdfs = [...e.dataTransfer.files].filter(isPdf);
+  // a text file (.txt, .md, .json, .csv, .tsv): flashcards — into the open deck or a new one
+  const txt = [...e.dataTransfer.files].find(f => /\.(txt|md|markdown|json|csv|tsv)$/i.test(f.name) || f.type.startsWith('text/'));
+  if (!pdfs.length && txt) {
+    e.preventDefault();
+    (async () => {
+      const deck = !document.getElementById('deck').hidden && settings.openDeck ? await store.get(settings.openDeck) : null;
+      importCardsSheet({ deck, text: await txt.text() });
+    })();
+    return;
+  }
   if (!pdfs.length) return;
   e.preventDefault();
   importPdfFile(pdfs[0]);
@@ -77,10 +88,11 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   await store.open();
   initEditor();
   initTools();
-  configureSync({ beforeSync: flushSave, isLocked: id => isLocked(id) || textLocked(id), isOpen: id => ed.tabs.some(t => t.id === id) || settings.openText === id });
+  configureSync({ beforeSync: flushSave, isLocked: id => isLocked(id) || textLocked(id) || deckLocked(id), isOpen: id => ed.tabs.some(t => t.id === id) || settings.openText === id || settings.openDeck === id });
   bus.addEventListener('change', scheduleSync);
   await seed();
-  if (settings.openText) openTextDoc(settings.openText);
+  if (settings.openDeck) openDeck(settings.openDeck);
+  else if (settings.openText) openTextDoc(settings.openText);
   else if (ed.tab && settings.activeTab) activateTab(ed.tab);
   else renderLibrary();
   offerClipboardImport();

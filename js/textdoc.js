@@ -16,6 +16,7 @@ import { store, settings, saveSettings, bus } from './store.js';
 import { menu, popover, closePopover, toast, promptText } from './ui.js';
 import { loadImageFile } from './pdf.js';
 import { renderLibrary } from './library.js';
+import { openDoc } from './editor.js';
 import { ensureLocal } from './offload.js';
 
 // Yjs (CRDT library Goodnotes stores text documents with) — only needed for .goodnotes
@@ -251,7 +252,10 @@ const td = { doc: null, el: null, content: null, dirty: false, range: null };
 export const textLocked = id => td.doc?.id === id && td.dirty;
 const view = () => $('#textdoc');
 
-export async function openTextDoc(id) {
+// Text documents open in a tab like notebooks (editor.js activateTab calls showTextDoc)
+export const openTextDoc = id => openDoc(id);
+
+export async function showTextDoc(id) {
   let doc = await store.get(id);
   if (doc?.offloaded) { // kept only in Google Drive: load it first
     doc = await ensureLocal(doc);
@@ -275,10 +279,17 @@ export async function openTextDoc(id) {
 
 export async function closeTextDoc() {
   await saveNow();
-  td.doc = null; settings.openText = null; saveSettings();
+  td.doc = null; settings.openText = null; settings.activeTab = null; saveSettings();
   view().hidden = true;
   $('#library').hidden = false;
   renderLibrary();
+}
+
+// Leaves the document for another tab (the library is not shown)
+export async function leaveTextDoc() {
+  await saveNow();
+  td.doc = null; settings.openText = null; saveSettings();
+  view().hidden = true;
 }
 
 const save = debounce(() => saveNow(), 500);

@@ -18,10 +18,10 @@ const stable = v => JSON.stringify(v, (k, x) => (x && typeof x === 'object' && !
   ? Object.fromEntries(Object.keys(x).sort().map(key => [key, x[key]])) : x));
 export const same = (a, b) => stable(a) === stable(b);
 
-const LIST_KEYS = { notebook: 'pages', textdoc: 'blocks' };
-const SKIP = new Set(['id', 'kind', 'updated', 'pages', 'blocks', 'conflicts']);
-const FIELD_LABEL = { name: 'Name', parent: 'Ordner', cover: 'Cover', color: 'Farbe', icon: 'Symbol' };
-const show = v => (v == null || v === '' ? '–' : typeof v === 'string' ? `„${v.length > 40 ? v.slice(0, 40) + '…' : v}“` : JSON.stringify(v).slice(0, 40));
+const LIST_KEYS = { notebook: 'pages', textdoc: 'blocks', deck: 'cards' };
+const SKIP = new Set(['id', 'kind', 'updated', 'pages', 'blocks', 'cards', 'conflicts']);
+const FIELD_LABEL = { name: 'Name', parent: 'Ordner', cover: 'Cover', color: 'Farbe', icon: 'Symbol', retention: 'Ziel-Behaltensrate', newPerDay: 'Neue Karten pro Tag' };
+const show = v => (v == null || v === '' ? '–' : v.strokes ? `Handschrift mit ${v.strokes.length} Strich${v.strokes.length === 1 ? '' : 'en'}` : typeof v === 'string' ? `„${v.length > 40 ? v.slice(0, 40) + '…' : v}“` : JSON.stringify(v).slice(0, 40));
 
 // Whether every item carries an id (pages of very old records may not) — otherwise no merge.
 export const mergeable = r => !r || r.deleted || !LIST_KEYS[r.kind] || (r[LIST_KEYS[r.kind]] || []).every(x => x && x.id
@@ -46,7 +46,9 @@ export function mergeOrder(bo, lo, ro) {
 
 // Merge lists of items with ids. mergeItem(B, L, R) handles an item changed on both sides and
 // returns { item, dup } (dup: an extra copy placed right after it).
-function mergeList(b, l, r, ctx, what, mergeItem) {
+// progressOnly(B, X): the item differs from the base only in ways a deletion may override
+// (flashcards: new reviews) — then a deletion on the other side stands, without a note.
+function mergeList(b, l, r, ctx, what, mergeItem, progressOnly = () => false) {
   const map = xs => new Map((xs || []).map(x => [x.id, x]));
   const bm = map(b), lm = map(l), rm = map(r);
   const out = new Map(), dups = new Map();
@@ -59,7 +61,7 @@ function mergeList(b, l, r, ctx, what, mergeItem) {
     } else {
       const X = L || R;
       if (!B) out.set(id, X);       // new on that side
-      else if (!same(X, B)) {       // deleted on one side, changed on the other: keep it
+      else if (!same(X, B) && !progressOnly(B, X)) { // deleted on one side, changed on the other: keep it
         out.set(id, X);
         ctx.note(L ? `${what} wurde auf einem anderen Gerät gelöscht, hier aber geändert – bleibt erhalten.`
           : `${what} wurde hier gelöscht, auf einem anderen Gerät aber geändert – wiederhergestellt.`);
@@ -127,6 +129,30 @@ const mergePage = ctx => (B, L, R) => ({
   },
 });
 
+// Flashcards (deck.js / srs.js): the learning progress is the card's review log, so reviews made on
+// two devices are simply put together (union, by time) and the schedule is replayed from it — no
+// conflict. A reset of the progress (card.reset = time) is kept as the later of both. Text (front,
+// back) is merged like any field. A card deleted on one device stays deleted even if it was
+// studied on the other; only an edit of its text brings it back (with a note).
+const logKey = e => e[0] + ':' + e[1];
+function unionLog(a = [], b = []) {
+  const m = new Map();
+  for (const e of [...a, ...b]) if (Array.isArray(e)) m.set(logKey(e), e);
+  return [...m.values()].sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+}
+const CARD_PROGRESS = new Set(['id', 'log', 'reset']);
+const cardText = c => Object.fromEntries(Object.entries(c || {}).filter(([k]) => !CARD_PROGRESS.has(k)));
+const cardProgressOnly = (B, X) => same(cardText(B), cardText(X));
+const mergeCard = ctx => (B, L, R) => {
+  const item = { ...mergeFields(B, L, R, ctx, CARD_PROGRESS, { front: 'Die Vorderseite einer Karte', back: 'Die Rückseite einer Karte', frontInk: 'Die Handschrift auf einer Vorderseite', backInk: 'Die Handschrift auf einer Rückseite' }), id: L.id };
+  const log = unionLog(L.log, R.log);
+  if (log.length) item.log = log;
+  const reset = Math.max(L.reset || 0, R.reset || 0);
+  if (reset) item.reset = reset;
+  return { item };
+};
+export { unionLog };
+
 // B must exist (without a base sync.js keeps the newer version instead).
 // Returns { rec, notes }; rec.updated is set by the caller.
 export function merge3(B, L, R) {
@@ -145,6 +171,7 @@ export function merge3(B, L, R) {
   const key = LIST_KEYS[rec.kind];
   if (key === 'pages') rec.pages = mergeList(B?.pages, L.pages, R.pages, ctx, 'Eine Seite', mergePage(ctx));
   if (key === 'blocks') rec.blocks = mergeList(B?.blocks, L.blocks, R.blocks, ctx, 'Ein Absatz', leafMerge(ctx, 'Ein Absatz', nodeId));
+  if (key === 'cards') rec.cards = mergeList(B?.cards, L.cards, R.cards, ctx, 'Eine Karteikarte', mergeCard(ctx), cardProgressOnly);
   // Conflict notes of both sides stay until the user dismisses them; a note both sides had and
   // one side dismissed since stays dismissed.
   const key2 = c => c.at + '|' + c.text;

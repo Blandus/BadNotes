@@ -2,7 +2,7 @@ import { uid } from './util.js';
 import { toRadius } from './ink.js';
 
 // Shown in the settings, to check which version a device is running. Raise with each update.
-export const APP_VERSION = '65';
+export const APP_VERSION = '69';
 
 export const PAGE_W = 1000;
 export const FORMATS = { a4: { label: 'A4 Hoch', h: 1414 }, a4l: { label: 'A4 Quer', h: 707 }, letter: { label: 'Letter', h: 1294 } };
@@ -31,6 +31,7 @@ export const emit = (type, detail) => bus.dispatchEvent(new CustomEvent(type, { 
 export function migrate(r) {
   if (!r.kind) r.kind = 'notebook';
   if (r.kind === 'textdoc') r.blocks ||= [];
+  if (r.kind === 'deck') r.cards ||= [];
   if (r.kind === 'notebook') {
     r.pages ||= [];
     for (const p of r.pages) {
@@ -49,7 +50,7 @@ export function migrate(r) {
 // background images can be hundreds of MB. A light record is everything except the content
 // (pages / blocks), plus pageCount and light: true. Saving a light record (store.put) only
 // updates the fields it has; the stored content stays untouched.
-const CONTENT_KEYS = ['pages', 'blocks'];
+const CONTENT_KEYS = ['pages', 'blocks', 'cards'];
 export function light(r) {
   const out = { light: true };
   for (const k in r) if (!CONTENT_KEYS.includes(k)) out[k] = r[k];
@@ -62,12 +63,13 @@ export function light(r) {
       if (files.size) out.pdfFiles = [...files]; else delete out.pdfFiles;
     }
   }
+  if (r.kind === 'deck') out.cardCount = r.offloaded ? r.cardCount : (r.cards || []).length; // flashcards (deck.js)
   return out;
 }
 // a light record put onto the stored full one
 function applyLight(full, l) {
   const out = { ...full };
-  for (const k in l) if (k !== 'light' && k !== 'pageCount' && !CONTENT_KEYS.includes(k)) out[k] = l[k];
+  for (const k in l) if (k !== 'light' && k !== 'pageCount' && k !== 'cardCount' && !CONTENT_KEYS.includes(k)) out[k] = l[k];
   for (const k in full) if (!(k in l) && !CONTENT_KEYS.includes(k) && k !== 'kind' && k !== 'id') delete out[k]; // fields removed in the light copy
   return out;
 }
