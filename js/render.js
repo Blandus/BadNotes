@@ -120,7 +120,7 @@ function pagePt(h) {
 }
 
 // Infinite pages: lines, grid or dots continue across the whole area (no margins or headers).
-function drawInfiniteTemplate(ctx, page) {
+export function drawInfiniteTemplate(ctx, page) {
   const t = page.template, dark = page.paper === 'dark';
   if (!t || t === 'blank') return;
   const x0 = pageX0(page), y0 = pageY0(page), x1 = x0 + pageW(page), y1 = y0 + pageH(page);

@@ -1,8 +1,9 @@
-import { PAGE_W } from './store.js';
-import { renderPage, pageH, pageX0, pageY0, unionBox } from './render.js';
-import { uid, readAsDataURL } from './util.js';
+import { renderPage, pageX0, pageY0 } from './render.js';
+import { readAsDataURL } from './util.js';
 import { toast } from './ui.js';
 import { pdfFileToPages } from './pdfdoc.js';
+import { createPdf, exportArea } from './pdf-export.js';
+export { MAX_EXPORT_PAGES } from './pdf-export.js';
 
 // Pages of a new notebook from a PDF. The PDF itself is stored once and the pages refer to it
 // (pdfdoc.js): nothing is converted to images, so even a 450-page textbook stays a small
@@ -45,13 +46,6 @@ export async function loadImageFile(file, max = 1600) {
 
 const safeName = n => (n || 'Folio').replace(/[\\/:*?"<>|]/g, '_');
 
-// Area to export: the whole page; for an infinite page its content plus a margin.
-function exportArea(page) {
-  if (!page.inf) return { x: 0, y: 0, w: PAGE_W, h: pageH(page) };
-  if (!page.elements.length) return { x: pageX0(page), y: pageY0(page), w: PAGE_W, h: 1414 };
-  const b = unionBox(page.elements), m = 40;
-  return { x: b.x - m, y: b.y - m, w: b.w + 2 * m, h: b.h + 2 * m };
-}
 // Renders an area of a page into a new canvas (scale s, capped so the canvas stays within browser limits).
 async function renderArea(page, a, s) {
   s = Math.min(s, Math.sqrt(1.6e7 / (a.w * a.h)), 16000 / Math.max(a.w, a.h));
@@ -61,29 +55,24 @@ async function renderArea(page, a, s) {
   return c;
 }
 
-export const MAX_EXPORT_PAGES = 500;
+let exportingPdf = false;
 export async function exportPdf(doc, pages = doc.pages) {
-  const { jsPDF } = window.jspdf || {};
-  if (!jsPDF) return toast('PDF-Bibliothek nicht geladen (offline?)');
-  // the whole PDF is built in memory: long documents get smaller page images, very long ones
-  // are refused (an iPad would run out of memory) — export single pages or a range instead
-  if (pages.length > MAX_EXPORT_PAGES) return toast(`Zu lang für den Export auf einmal (${pages.length} Seiten, höchstens ${MAX_EXPORT_PAGES}).`, 5000);
-  const long = pages.length > 100, s = long ? 1.1 : 1.6, q = long ? 0.75 : 0.9;
-  let pdf;
-  for (const [i, page] of pages.entries()) {
-    toast(`PDF wird erstellt: Seite ${i + 1} von ${pages.length}`, 0);
-    const a = exportArea(page);
-    const c = await renderArea(page, a, s);
-    const pt = Math.min(0.595, 14400 / Math.max(a.w, a.h)); // A4 width = 595 pt; PDF pages are at most 14400 pt
-    const fmt = [a.w * pt, a.h * pt];
-    const orient = fmt[0] > fmt[1] ? 'l' : 'p';
-    if (!pdf) pdf = new jsPDF({ unit: 'pt', format: fmt, orientation: orient });
-    else pdf.addPage(fmt, orient);
-    pdf.addImage(c.toDataURL('image/jpeg', q), 'JPEG', 0, 0, fmt[0], fmt[1]);
-    c.width = c.height = 0;
-  }
-  pdf.save(safeName(doc.name) + '.pdf');
-  toast('PDF exportiert');
+  if (exportingPdf) return toast('Ein PDF-Export läuft bereits');
+  exportingPdf = true;
+  try {
+    const snapshot = structuredClone(pages);
+    const bytes = await createPdf({ name: doc.name }, snapshot, message => toast(message, 0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    const link = document.createElement('a');
+    link.href = url; link.download = safeName(doc.name) + '.pdf';
+    document.body.append(link); link.click(); link.remove();
+    // Safari needs the URL after the click has returned, especially for large PDFs.
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    toast('PDF mit Text und Vektoren exportiert');
+  } catch (err) {
+    console.error('PDF-Export:', err);
+    toast('PDF-Export fehlgeschlagen: ' + (err.message || 'Unbekannter Fehler'), 8000);
+  } finally { exportingPdf = false; }
 }
 
 export async function exportPng(doc, page, index) {

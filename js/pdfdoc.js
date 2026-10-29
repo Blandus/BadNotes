@@ -61,6 +61,23 @@ async function fileBlob(id) {
   return fetching.get(id);
 }
 
+// Original bytes and PDF.js' exact display transforms for lossless PDF export.
+// Missing/offloaded originals must raise an error, never become a placeholder in the export.
+export async function pdfExportSource(id, numbers) {
+  const bytes = new Uint8Array(await (await fileBlob(id)).arrayBuffer());
+  const views = new Map();
+  await withDoc(id, async doc => {
+    for (const n of numbers) {
+      if (!Number.isInteger(n) || n < 1 || n > doc.numPages) throw new Error('Ungültige PDF-Seitennummer');
+      const page = await doc.getPage(n);
+      const width = page.getViewport({ scale: 1 }).width;
+      const view = page.getViewport({ scale: PAGE_W / width });
+      views.set(n, { transform: view.transform, width: view.width, height: view.height, box: page.view });
+    }
+  });
+  return { bytes, views };
+}
+
 // load a file from Drive now if it is not on this device (favourites: available offline)
 export const fetchFileNow = id => fileBlob(id).then(() => true);
 

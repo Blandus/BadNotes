@@ -1,9 +1,21 @@
 // Offline cache for the app shell. Network first, so updates arrive as soon as you're online.
-const CACHE = 'folio-v69';
+const CACHE = 'folio-v71';
 const ASSETS = [
   './', 'index.html', 'style.css', 'manifest.json', 'folio-mark.svg', 'favicon.png', 'logo.png', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png',
   'js/main.js', 'js/util.js', 'js/icons.js', 'js/store.js', 'js/render.js', 'js/ink.js', 'js/handwriting.js', 'js/ui.js',
-  'js/library.js', 'js/editor.js', 'js/tools.js', 'js/pdf.js', 'js/sync.js', 'js/suggest.js', 'js/goodnotes.js', 'js/goodnotes-export.js', 'js/textdoc.js', 'js/richtext.js', 'js/addpage.js', 'js/merge.js', 'js/ics.js', 'js/calendar.js', 'js/offload.js', 'js/pdfdoc.js', 'js/pencilrec.js', 'js/deck.js', 'js/srs.js', 'js/cardformat.js', 'js/inkpad.js', 'js/learnplan.js', 'datenschutz.html',
+  'js/library.js', 'js/editor.js', 'js/tools.js', 'js/pdf.js', 'js/pdf-export.js', 'js/sync.js', 'js/suggest.js', 'js/goodnotes.js', 'js/goodnotes-export.js', 'js/textdoc.js', 'js/richtext.js', 'js/addpage.js', 'js/merge.js', 'js/ics.js', 'js/calendar.js', 'js/offload.js', 'js/pdfdoc.js', 'js/pencilrec.js', 'js/deck.js', 'js/srs.js', 'js/cardformat.js', 'js/inkpad.js', 'js/learnplan.js', 'datenschutz.html',
+  'vendor/pdf/NotoSans-Bold.ttf',
+  'vendor/pdf/NotoSans-BoldItalic.ttf',
+  'vendor/pdf/NotoSans-Italic.ttf',
+  'vendor/pdf/NotoSans-Regular.ttf',
+  'vendor/pdf/NotoSansMono-Bold.ttf',
+  'vendor/pdf/NotoSansMono-Regular.ttf',
+  'vendor/pdf/NotoSerif-Bold.ttf',
+  'vendor/pdf/NotoSerif-BoldItalic.ttf',
+  'vendor/pdf/NotoSerif-Italic.ttf',
+  'vendor/pdf/NotoSerif-Regular.ttf',
+  'vendor/pdf/fontkit.umd.min.js',
+  'vendor/pdf/pdf-lib.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
