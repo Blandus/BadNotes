@@ -75,7 +75,7 @@ Folio verwendet HTML, CSS und Vanilla JavaScript mit ES-Modulen. Für den lokale
 | Offline-Nutzung | Service Worker und Web-App-Manifest |
 | PDFs | PDF.js für Darstellung und Textextraktion, jsPDF für den Export |
 | Google-Anbindung | Google Identity Services, Drive API und Calendar API |
-| Lernen | FSRS-6-basierte Wiederholungsplanung und KaTeX für Formeln |
+| Lernen | FSRS-6-basierte Wiederholungsplanung und LaTeX für Formeln |
 | Handschrifterkennung | DE·HTR v2 mit ONNX Runtime Web in einem Web Worker |
 
 Der Code ist nach Aufgaben gegliedert: `editor.js`, `tools.js` und `handwriting.js` behandeln Editor und Stifteingabe; `store.js`, `sync.js` und `merge.js` die Speicherung und Synchronisierung. Karteikarten und Lernplanung liegen in `deck.js`, `srs.js` und `learnplan.js`, die Kalenderfunktionen in `calendar.js` und `ics.js`.
